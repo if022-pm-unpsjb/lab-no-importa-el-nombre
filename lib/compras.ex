@@ -1,7 +1,7 @@
 defmodule Libremarket.Compras do
 
   def comprar() do
-    :show_me_the_money
+    Libremarket.Infracciones.Server.detectar_infraccion()
   end
 
 end
