@@ -1,10 +1,34 @@
 defmodule Libremarket.Compras do
 
+  @doc """
+  Modificar el metodo para ingresar el numero del pedido compra
+  """
   def comprar(producto) do
-    Libremarket.Infracciones.Server.detectar_infraccion(producto)
-    Libremarket.Pagos.Server.autorizar_pago(producto)
+    case Libremarket.Ventas.Server.comprar(producto) do
+      {:error, :sin_stock} -> {:error, :sin_stock}
+      {:ok, producto } ->
+        if confirmar_compra?() do
+          envio = elegir_envio()
+          #Aca se integra Pagos e Infracciones
+          {:ok, %{producto: producto, envio: envio}}
+        else
+          Libremarket.Ventas.Server.liberar(producto)
+          {:cancelada, producto}
+        end
+    end
   end
 
+  defp confirmar_compra?() do
+    Enum.random(1..100) <= 80
+  end
+
+  defp elegir_envio() do
+    if Enum.random(1..100) <= 70 do
+      :correo
+    else
+      :retiro
+    end
+  end
 end
 
 defmodule Libremarket.Compras.Server do
@@ -23,8 +47,8 @@ defmodule Libremarket.Compras.Server do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  def comprar(pid \\ __MODULE__, producto) do
-    GenServer.call(pid, {:comprar, producto})
+  def comprar(pid \\ __MODULE__) do
+    GenServer.call(pid, :comprar)
   end
 
   # Callbacks
@@ -41,9 +65,8 @@ defmodule Libremarket.Compras.Server do
   Callback para un call :comprar
   """
   @impl true
-  def handle_call({:comprar, producto}, _from, state) do
-    result = Libremarket.Compras.comprar(producto)
+  def handle_call(:comprar, _from, state) do
+    result = Libremarket.Compras.comprar
     {:reply, result, state}
   end
-
 end
