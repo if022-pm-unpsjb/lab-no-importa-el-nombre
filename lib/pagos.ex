@@ -1,7 +1,7 @@
 defmodule Libremarket.Pagos do
 
   def autorizar_pago() do
-    :rand.uniform(100) < 70
+    Enum.random(1..100) <= 70
   end
 
 end
@@ -45,7 +45,7 @@ defmodule Libremarket.Pagos.Server do
   """
   @impl true
   def handle_call({:autorizar_pago, id_compra}, _from, state) do
-    pago = Libremarket.Pagos.autorizar_pago
+    pago = Libremarket.Pagos.autorizar_pago()
     new_state = Map.put(state, id_compra, pago)
     {:reply, pago, new_state}
   end
