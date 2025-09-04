@@ -11,18 +11,31 @@ defmodule Libremarket.Compras do
       {:ok, producto} ->
         if confirmar_compra?() do
           id_compra = :erlang.unique_integer([:positive])
-          case Libremarket.Pagos.Server.autorizar_pago(id_compra) do
-            true ->
-              envio = elegir_envio()
-              {:ok, %{id: id_compra, producto: producto, envio: envio}}
 
+          # El modulo de Pagos detecta infracciones en el pago
+          case Libremarket.Pagos.Server.autorizar_pago(id_compra) do
+            # El modulo detecta infraccion
             false ->
-              # Pago rechazado, entonces libera producto
               Libremarket.Ventas.Server.liberar(producto)
               {:error, :pago_rechazado}
+
+            # El modulo no detecta infraccion
+            true ->
+              # El modulo de Infracciones detecta infracciones en la compra
+              case Libremarket.Infracciones.Server.detectar_infraccion(id_compra) do
+                # Se encuentra infraccion
+                true ->
+                  Libremarket.Ventas.Server.liberar(producto)
+                  {:error, :infraccion_detectada}
+
+                # No se encuentra infraccion
+                false ->
+                  envio = elegir_envio()
+                  {:ok, %{id: id_compra, producto: producto, envio: envio}}
+              end
           end
+        # Se cancela la compra del producto
         else
-          # Cliente canceló, entonces se libera producto
           Libremarket.Ventas.Server.liberar(producto)
           {:cancelada, producto}
         end
