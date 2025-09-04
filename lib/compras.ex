@@ -31,7 +31,11 @@ defmodule Libremarket.Compras do
                 # No se encuentra infraccion
                 false ->
                   envio = elegir_envio()
-                  {:ok, %{id: id_compra, producto: producto, envio: envio}}
+                  {:ok, envio_info} =
+                    Libremarket.Envios.Server.registrar(id_compra, producto, envio)
+
+                  {:ok,
+                   %{id: id_compra, producto: producto, envio: envio, costo: envio_info.costo}}
               end
           end
         # Se cancela la compra del producto
