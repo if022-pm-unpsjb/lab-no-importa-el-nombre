@@ -3,29 +3,44 @@ defmodule Libremarket.Compras do
   def comprar(producto_id) when is_integer(producto_id) do
     case Libremarket.Ventas.Server.comprar(producto_id) do
       {:error, :producto_invalido} ->
-        {:error, :producto_invalido}
+        {:error, %{producto_id: producto_id, estado: :producto_invalido}}
 
       {:error, :sin_stock} ->
-        {:error, :sin_stock}
+        {:error, %{producto_id: producto_id, estado: :sin_stock}}
 
       {:ok, producto_actualizado} ->
+        id_compra = :erlang.unique_integer([:positive])
+
         # Confirmación del cliente (80%)
         if confirmar_compra?() do
-          id_compra = :erlang.unique_integer([:positive])
 
           # Autorizar pago (70%)
           case Libremarket.Pagos.Server.autorizar_pago(id_compra) do
             false ->
-              # Pago rechazado → liberar producto
+              # Si el pago se rechaza, se libera producto
               Libremarket.Ventas.Server.liberar(producto_id)
-              {:error, :pago_rechazado}
+              {:error,
+               %{
+                 id: id_compra,
+                 producto_id: producto_id,
+                 nombre: producto_actualizado.name,
+                 precio: producto_actualizado.precio,
+                 estado: :pago_rechazado
+               }}
 
             true ->
               # Detectar infracciones (30%)
               case Libremarket.Infracciones.Server.detectar_infraccion(id_compra) do
                 true ->
                   Libremarket.Ventas.Server.liberar(producto_id)
-                  {:error, :infraccion_detectada}
+                  {:error,
+                   %{
+                     id: id_compra,
+                     producto_id: producto_id,
+                     nombre: producto_actualizado.name,
+                     precio: producto_actualizado.precio,
+                     estado: :infraccion_detectada
+                   }}
 
                 false ->
                   envio = elegir_envio()
@@ -42,14 +57,22 @@ defmodule Libremarket.Compras do
                      precio: producto_actualizado.precio,
                      envio: envio,
                      costo_envio: envio_info.costo_envio,
-                     total: total
+                     total: total,
+                     estado: :completada
                    }}
               end
           end
         else
           # Cliente canceló
           Libremarket.Ventas.Server.liberar(producto_id)
-          {:cancelada, producto_id}
+          {:error,
+           %{
+             id: id_compra,
+             producto_id: producto_id,
+             nombre: producto_actualizado.name,
+             precio: producto_actualizado.precio,
+             estado: :cancelada
+           }}
         end
     end
   end
