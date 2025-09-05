@@ -17,8 +17,8 @@ defmodule Libremarket.Envios.Server do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  def registrar(pid \\ __MODULE__, id_compra, producto, tipo_envio, precio_producto) do
-    GenServer.call(pid, {:registrar, id_compra, producto, tipo_envio, precio_producto})
+  def registrar(pid \\ __MODULE__, id_compra, tipo_envio) do
+    GenServer.call(pid, {:registrar, id_compra, tipo_envio})
   end
 
   def listar(pid \\ __MODULE__) do
@@ -32,19 +32,18 @@ defmodule Libremarket.Envios.Server do
   end
 
   @impl true
-  def handle_call({:registrar, id_compra, producto, tipo_envio, precio_producto}, _from, state) do
-    costo_envio = Libremarket.Envios.costo(tipo_envio)
-    total = precio_producto + costo_envio
-    envio = %{
-      producto: producto,
-      tipo_envio: tipo_envio,
-      costo_envio: costo_envio,
-      precio_producto: precio_producto,
-      total: total
-    }
-    new_state = Map.put(state, id_compra, envio)
-    {:reply, {:ok, envio}, new_state}
-  end
+def handle_call({:registrar, id_compra, tipo_envio}, _from, state) do
+  costo_envio = Libremarket.Envios.costo(tipo_envio)
+
+  envio = %{
+    id_compra: id_compra,
+    tipo_envio: tipo_envio,
+    costo_envio: costo_envio
+  }
+
+  new_state = Map.put(state, id_compra, envio)
+  {:reply, {:ok, envio}, new_state}
+end
 
   @impl true
   def handle_call(:listar, _from, state) do

@@ -22,11 +22,14 @@ defmodule Libremarket.Ventas.Server do
 
   def listar_stock(pid \\ __MODULE__), do: GenServer.call(pid, :listar)
 
-  def comprar(pid \\ __MODULE__, producto_id, cantidad \\ 1),
-    do: GenServer.call(pid, {:comprar, producto_id, cantidad})
+  def reservar(pid \\ __MODULE__, producto_id, cantidad \\ 1),
+    do: GenServer.call(pid, {:reservar, producto_id, cantidad})
 
   def liberar(pid \\ __MODULE__, producto_id, cantidad \\ 1),
     do: GenServer.call(pid, {:liberar, producto_id, cantidad})
+
+  def listar(pid \\ __MODULE__),
+    do: GenServer.call(pid, :listar)
 
   # Callbacks
   @impl true
@@ -40,7 +43,7 @@ defmodule Libremarket.Ventas.Server do
   end
 
   @impl true
-  def handle_call({:comprar, id, cantidad}, _from, state)
+  def handle_call({:reservar, id, cantidad}, _from, state)
       when is_integer(id) and is_integer(cantidad) and cantidad > 0 do
     case Map.fetch(state, id) do
       :error ->
