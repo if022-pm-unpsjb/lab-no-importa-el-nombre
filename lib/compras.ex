@@ -1,6 +1,5 @@
 defmodule Libremarket.Compras do
 
-  #def comprar(producto_id) when is_integer(producto_id) do
   def comprar(%{id: id_compra, producto_id: producto_id, medio_de_pago: medio, forma_de_entrega: envio} = compra) do
         # Confirmación del cliente (80%)
         if confirmar_compra?() do
@@ -12,7 +11,6 @@ defmodule Libremarket.Compras do
               {:error, %{producto_id: producto_id, estado: :sin_stock}}
 
             {:ok, producto_actualizado} ->
-              #id_compra = :erlang.unique_integer([:positive])
               # Detectar infracciones (30%)
                     case Libremarket.Infracciones.Server.detectar_infraccion(id_compra) do
                       true ->
@@ -26,9 +24,6 @@ defmodule Libremarket.Compras do
                             {:error, compra_actualizada}
 
                       false ->
-                        # envio = elegir_envio()
-                        #{:ok, envio_info} =
-                        #  Libremarket.Envios.Server.registrar(id_compra, producto_id, envio, producto_actualizado.precio)
                         # Autorizar pago (70%)
                         case Libremarket.Pagos.Server.autorizar_pago(id_compra) do
                           false ->
@@ -43,7 +38,6 @@ defmodule Libremarket.Compras do
                             {:error, compra_actualizada}
 
                           true ->
-                            #Libremarket.Ventas.Server.liberar(producto_id)
                             compra_actualizada =
                               compra
                                 |> Map.put(:nombre, producto_actualizado.name)
@@ -62,8 +56,6 @@ defmodule Libremarket.Compras do
           end
         else
           # Cliente canceló
-          # Libremarket.Ventas.Server.liberar(producto_id)
-
            Libremarket.Ventas.Server.liberar(producto_id)
            compra_actualizada =
            compra
@@ -76,7 +68,6 @@ defmodule Libremarket.Compras do
   end
 
   defp confirmar_compra?(), do: Enum.random(1..100) <= 80
-  #defp elegir_envio(), do: if(Enum.random(1..100) <= 70, do: :correo, else: :retiro)
 end
 
 defmodule Libremarket.Compras.Server do
@@ -84,9 +75,7 @@ defmodule Libremarket.Compras.Server do
 
   def start_link(opts \\ %{}), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  #def comprar(pid \\ __MODULE__, producto_id), do: GenServer.call(pid, {:comprar, producto_id})
   def comprar(pid \\ __MODULE__, id_compra), do: GenServer.call(pid, {:comprar, id_compra})
-
 
   def seleccionar_producto(pid \\ __MODULE__, producto_id) do
     GenServer.call(pid, {:seleccionar_producto, producto_id})
@@ -102,12 +91,6 @@ defmodule Libremarket.Compras.Server do
 
   @impl true
   def init(_opts), do: {:ok, %{}}
-
-  #@impl true
-  #def handle_call({:comprar, producto_id}, _from, state) do
-    #result = Libremarket.Compras.comprar(producto_id)
-    #{:reply, result, state}
-  #end
 
   def handle_call({:comprar, id_compra}, _from, state) do
     case Map.fetch(state, id_compra) do
