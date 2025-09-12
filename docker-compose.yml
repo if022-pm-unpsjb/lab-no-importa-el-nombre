@@ -1,0 +1,35 @@
+services:
+  simulador:
+    image: elixir:alpine
+    container_name: simulador
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      SERVER_TO_RUN: simulador
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+    command: iex --sname simulador --cookie secret -S mix
+    # para habilitar -it
+    stdin_open: true
+    tty: true
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  infracciones:
+    image: elixir:alpine
+    container_name: compras
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      SERVER_TO_RUN: Compras.Server
+    command: iex --sname compras --cookie secret -S mix
+    # para habilitar -it
+    stdin_open: true
+    tty: true
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
