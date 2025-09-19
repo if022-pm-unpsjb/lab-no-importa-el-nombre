@@ -1,73 +1,52 @@
 defmodule Libremarket.Compras do
 
   def comprar(%{id: id_compra, producto_id: producto_id, medio_de_pago: medio, forma_de_entrega: envio} = compra) do
-        # Confirmación del cliente (80%)
-        if confirmar_compra?() do
-          case Libremarket.Ventas.Server.reservar(producto_id) do
-            {:error, :producto_invalido} ->
-              {:error, %{producto_id: producto_id, estado: :producto_invalido}}
+    if confirmar_compra?() do
+      case erpc(:'ventas@ventas', Libremarket.Ventas.Server, :reservar, [producto_id]) do
+        {:error, :producto_invalido} ->
+          {:error, %{producto_id: producto_id, estado: :producto_invalido}}
 
-            {:error, :sin_stock} ->
-              {:error, %{producto_id: producto_id, estado: :sin_stock}}
+        {:error, :sin_stock} ->
+          {:error, %{producto_id: producto_id, estado: :sin_stock}}
 
-            {:ok, producto_actualizado} ->
-              # Detectar infracciones (30%)
-                    case Libremarket.Infracciones.Server.detectar_infraccion(id_compra) do
-                      true ->
-                            Libremarket.Ventas.Server.liberar(producto_id)
-                            compra_actualizada =
-                              compra
-                              |> Map.put(:nombre, producto_actualizado.name)
-                              |> Map.put(:precio, producto_actualizado.precio)
-                              |> Map.put(:estado, :infraccion_detectada)
+        {:ok, producto_actualizado} ->
+          # Detectar infracciones
+          case erpc(:'infracciones@infracciones', Libremarket.Infracciones.Server, :detectar_infraccion, [id_compra]) do
+            true ->
+              erpc(:'ventas@ventas', Libremarket.Ventas.Server, :liberar, [producto_id])
+              {:error, Map.put(compra, :estado, :infraccion_detectada)}
 
-                            {:error, compra_actualizada}
+            false ->
+              # Autorizar pago
+              case erpc(:'pagos@pagos', Libremarket.Pagos.Server, :autorizar_pago, [id_compra]) do
+                false ->
+                  erpc(:'ventas@ventas', Libremarket.Ventas.Server, :liberar, [producto_id])
+                  {:error, Map.put(compra, :estado, :pago_rechazado)}
 
-                      false ->
-                        # Autorizar pago (70%)
-                        case Libremarket.Pagos.Server.autorizar_pago(id_compra) do
-                          false ->
-                            # Si el pago se rechaza, se libera producto
-                            Libremarket.Ventas.Server.liberar(producto_id)
-                            compra_actualizada =
-                              compra
-                                |> Map.put(:nombre, producto_actualizado.name)
-                                |> Map.put(:precio, producto_actualizado.precio)
-                                |> Map.put(:estado, :pago_rechazado)
+                true ->
+                  compra_actualizada =
+                    compra
+                    |> Map.put(:nombre, producto_actualizado.name)
+                    |> Map.put(:precio, producto_actualizado.precio)
+                    |> Map.put(:estado, :completada)
 
-                            {:error, compra_actualizada}
-
-                          true ->
-                            compra_actualizada =
-                              compra
-                                |> Map.put(:nombre, producto_actualizado.name)
-                                |> Map.put(:precio, producto_actualizado.precio)
-                                |> Map.put(:estado, :completada)
-
-                            #total = compra.precio + compra.costo_envio
-                            #compra_actualizada =
-                              #compra
-                                #|> Map.put(:total, total)
-                                #|> Map.put(:estado, :completada)
-                            {:ok, compra_actualizada}
-
-                        end
-                    end
+                  {:ok, compra_actualizada}
+              end
           end
-        else
-          # Cliente canceló
-           Libremarket.Ventas.Server.liberar(producto_id)
-           compra_actualizada =
-           compra
-             |> Map.put(:estado, :cancelado)
-
-           {:error, compra_actualizada}
-
-        end
-
+      end
+    else
+      erpc(:'ventas@ventas', Libremarket.Ventas.Server, :liberar, [producto_id])
+      {:error, Map.put(compra, :estado, :cancelado)}
+    end
   end
 
   defp confirmar_compra?(), do: Enum.random(1..100) <= 80
+
+  # helper
+  defp erpc(node, mod, fun, args) do
+    Node.connect(node)
+    :erpc.call(node, mod, fun, args)
+  end
 end
 
 defmodule Libremarket.Compras.Server do
@@ -108,27 +87,27 @@ defmodule Libremarket.Compras.Server do
     {:noreply, update_in(state, [id_compra], &Map.put(&1, :medio_de_pago, medio))}
   end
 
+  @envios_node :"envios@envios"
+
   @impl true
   def handle_cast({:seleccionar_forma_de_entrega, id_compra, entrega}, state) do
     case Map.fetch(state, id_compra) do
-    :error ->
-      {:noreply, state}
+      :error ->
+        {:noreply, state}
 
-    {:ok, compra} ->
-      {:ok, envio_info} =
-        Libremarket.Envios.Server.registrar(
-          id_compra,
-          entrega
-          )
+      {:ok, compra} ->
+        Node.connect(@envios_node)
+        {:ok, envio_info} =
+          :erpc.call(@envios_node, Libremarket.Envios.Server, :registrar, [id_compra, entrega])
 
-      compra_actualizada =
-        compra
-        |> Map.put(:forma_de_entrega, envio_info.tipo_envio)
-        |> Map.put(:costo_envio, envio_info.costo_envio)
+        compra_actualizada =
+          compra
+          |> Map.put(:forma_de_entrega, envio_info.tipo_envio)
+          |> Map.put(:costo_envio, envio_info.costo_envio)
 
-      {:noreply, Map.put(state, id_compra, compra_actualizada)}
+        {:noreply, Map.put(state, id_compra, compra_actualizada)}
+    end
   end
-end
 
   @impl true
   def handle_call({:seleccionar_producto, producto_id}, _from, state) do

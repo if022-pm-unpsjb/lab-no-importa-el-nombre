@@ -8,16 +8,13 @@ defmodule Libremarket.Supervisor do
     Supervisor.start_link(__MODULE__, [], name: __MODULE__)
   end
 
-  @impl true
   def init(_opts) do
-    children = [
-      Libremarket.Compras.Server,
-      Libremarket.Infracciones.Server,
-      Libremarket.Pagos.Server,
-      Libremarket.Ventas.Server,
-      Libremarket.Envios.Server
-    ]
+    server_to_run =
+      case System.get_env("SERVER_TO_RUN") do
+        nil -> []
+        mod_str -> [String.to_atom(mod_str)]
+      end
 
-    Supervisor.init(children, strategy: :one_for_one)
+    Supervisor.init(server_to_run, strategy: :one_for_one)
   end
 end

@@ -2,10 +2,10 @@ services:
   compras:
     image: elixir:alpine
     container_name: compras
+    hostname: compras
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
     environment:
       SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
       MIX_HOME: /app/mix_home
@@ -18,10 +18,10 @@ services:
   ventas:
     image: elixir:alpine
     container_name: ventas
+    hostname: ventas
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
     environment:
       SERVER_TO_RUN: Elixir.Libremarket.Ventas.Server
       MIX_HOME: /app/mix_home
@@ -34,10 +34,10 @@ services:
   pagos:
     image: elixir:alpine
     container_name: pagos
+    hostname: pagos
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
     environment:
       SERVER_TO_RUN: Elixir.Libremarket.Pagos.Server
       MIX_HOME: /app/mix_home
@@ -50,10 +50,10 @@ services:
   infracciones:
     image: elixir:alpine
     container_name: infracciones
+    hostname: infracciones
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
     environment:
       SERVER_TO_RUN: Elixir.Libremarket.Infracciones.Server
       MIX_HOME: /app/mix_home
@@ -66,10 +66,10 @@ services:
   envios:
     image: elixir:alpine
     container_name: envios
+    hostname: envios
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
     environment:
       SERVER_TO_RUN: Elixir.Libremarket.Envios.Server
       MIX_HOME: /app/mix_home

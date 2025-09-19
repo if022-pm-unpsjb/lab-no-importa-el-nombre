@@ -32,18 +32,18 @@ defmodule Libremarket.Envios.Server do
   end
 
   @impl true
-def handle_call({:registrar, id_compra, tipo_envio}, _from, state) do
-  costo_envio = Libremarket.Envios.costo(tipo_envio)
+  def handle_call({:registrar, id_compra, tipo_envio}, _from, state) do
+    costo_envio = Libremarket.Envios.costo(tipo_envio)
 
-  envio = %{
-    id_compra: id_compra,
-    tipo_envio: tipo_envio,
-    costo_envio: costo_envio
-  }
+    envio = %{
+      id_compra: id_compra,
+      tipo_envio: tipo_envio,
+      costo_envio: costo_envio
+    }
 
-  new_state = Map.put(state, id_compra, envio)
-  {:reply, {:ok, envio}, new_state}
-end
+    new_state = Map.put(state, id_compra, envio)
+    {:reply, {:ok, envio}, new_state}
+  end
 
   @impl true
   def handle_call(:listar, _from, state) do
