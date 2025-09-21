@@ -12,17 +12,19 @@ end
 defmodule Libremarket.Envios.Server do
   use GenServer
 
+  @global_name {:global, __MODULE__}
+
   # API
   def start_link(opts \\ %{}) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+    GenServer.start_link(__MODULE__, opts, name: @global_name)
   end
 
   def registrar(pid \\ __MODULE__, id_compra, tipo_envio) do
-    GenServer.call(pid, {:registrar, id_compra, tipo_envio})
+    GenServer.call(@global_name, {:registrar, id_compra, tipo_envio})
   end
 
   def listar(pid \\ __MODULE__) do
-    GenServer.call(pid, :listar)
+    GenServer.call(@global_name, :listar)
   end
 
   # Callbacks

@@ -9,12 +9,29 @@ defmodule Libremarket.Supervisor do
   end
 
   def init(_opts) do
+        topologies = [
+      gossip: [
+        strategy: Cluster.Strategy.Gossip,
+        config: [
+          port: 45892,
+          if_addr: "0.0.0.0",
+          multicast_addr: "127.0.0.1",
+          broadcast_only: true,
+          secret: "secret"
+        ]
+      ]
+    ]
+
     server_to_run =
       case System.get_env("SERVER_TO_RUN") do
         nil -> []
-        mod_str -> [String.to_atom(mod_str)]
+        server_to_run -> [{String.to_existing_atom(server_to_run), %{}}]
       end
 
-    Supervisor.init(server_to_run, strategy: :one_for_one)
+    childrens = [
+      { Cluster.Supervisor, [topologies, [name: Libremarket.ClusterSupervisor]]},
+    ] ++ server_to_run
+
+    Supervisor.init(childrens, strategy: :one_for_one)
   end
 end

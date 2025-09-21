@@ -2,79 +2,69 @@ services:
   compras:
     image: elixir:alpine
     container_name: compras
-    hostname: compras
     volumes:
       - ./:/app
     working_dir: /app
+    network_mode: "host"
     environment:
       SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
-    command: iex --sname compras --cookie secret -S mix
-    stdin_open: true
-    tty: true
+    command: elixir --sname compras --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   ventas:
     image: elixir:alpine
     container_name: ventas
-    hostname: ventas
     volumes:
       - ./:/app
     working_dir: /app
+    network_mode: "host"    
     environment:
       SERVER_TO_RUN: Elixir.Libremarket.Ventas.Server
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
-    command: iex --sname ventas --cookie secret -S mix
-    stdin_open: true
-    tty: true
+    command: elixir --sname ventas --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   pagos:
     image: elixir:alpine
     container_name: pagos
-    hostname: pagos
     volumes:
       - ./:/app
     working_dir: /app
+    network_mode: "host"
     environment:
       SERVER_TO_RUN: Elixir.Libremarket.Pagos.Server
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
-    command: iex --sname pagos --cookie secret -S mix
-    stdin_open: true
-    tty: true
+    command: elixir --sname pagos --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   infracciones:
     image: elixir:alpine
     container_name: infracciones
-    hostname: infracciones
     volumes:
       - ./:/app
     working_dir: /app
+    network_mode: "host"
     environment:
       SERVER_TO_RUN: Elixir.Libremarket.Infracciones.Server
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
-    command: iex --sname infracciones --cookie secret -S mix
-    stdin_open: true
-    tty: true
+    command: elixir --sname infracciones --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   envios:
     image: elixir:alpine
     container_name: envios
-    hostname: envios
     volumes:
       - ./:/app
     working_dir: /app
+    network_mode: "host"
     environment:
       SERVER_TO_RUN: Elixir.Libremarket.Envios.Server
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
-    command: iex --sname envios --cookie secret -S mix
-    stdin_open: true
-    tty: true
+    command: elixir --sname envios --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"

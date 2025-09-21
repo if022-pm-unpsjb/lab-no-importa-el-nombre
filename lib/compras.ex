@@ -2,7 +2,7 @@ defmodule Libremarket.Compras do
 
   def comprar(%{id: id_compra, producto_id: producto_id, medio_de_pago: medio, forma_de_entrega: envio} = compra) do
     if confirmar_compra?() do
-      case erpc(:'ventas@ventas', Libremarket.Ventas.Server, :reservar, [producto_id]) do
+      case Libremarket.Ventas.Server.reservar(producto_id) do
         {:error, :producto_invalido} ->
           {:error, %{producto_id: producto_id, estado: :producto_invalido}}
 
@@ -11,17 +11,30 @@ defmodule Libremarket.Compras do
 
         {:ok, producto_actualizado} ->
           # Detectar infracciones
-          case erpc(:'infracciones@infracciones', Libremarket.Infracciones.Server, :detectar_infraccion, [id_compra]) do
+          case Libremarket.Infracciones.Server.detectar_infraccion(id_compra) do
             true ->
-              erpc(:'ventas@ventas', Libremarket.Ventas.Server, :liberar, [producto_id])
-              {:error, Map.put(compra, :estado, :infraccion_detectada)}
+              Libremarket.Ventas.Server.liberar(producto_id)
+              compra_actualizada =
+                  compra
+                  |> Map.put(:nombre, producto_actualizado.name)
+                  |> Map.put(:precio, producto_actualizado.precio)
+                  |> Map.put(:estado, :infraccion_detectada)
+
+              {:error, compra_actualizada}
 
             false ->
               # Autorizar pago
-              case erpc(:'pagos@pagos', Libremarket.Pagos.Server, :autorizar_pago, [id_compra]) do
+              case Libremarket.Pagos.Server.autorizar_pago(id_compra) do
                 false ->
-                  erpc(:'ventas@ventas', Libremarket.Ventas.Server, :liberar, [producto_id])
-                  {:error, Map.put(compra, :estado, :pago_rechazado)}
+                  # Si el pago se rechaza, se libera producto
+                  Libremarket.Ventas.Server.liberar(producto_id)
+                  compra_actualizada =
+                    compra
+                      |> Map.put(:nombre, producto_actualizado.name)
+                      |> Map.put(:precio, producto_actualizado.precio)
+                      |> Map.put(:estado, :pago_rechazado)
+
+                  {:error, compra_actualizada}
 
                 true ->
                   compra_actualizada =
@@ -35,8 +48,12 @@ defmodule Libremarket.Compras do
           end
       end
     else
-      erpc(:'ventas@ventas', Libremarket.Ventas.Server, :liberar, [producto_id])
-      {:error, Map.put(compra, :estado, :cancelado)}
+      Libremarket.Ventas.Server.liberar(producto_id)
+        compra_actualizada =
+        compra
+        |> Map.put(:estado, :cancelado)
+
+      {:error, compra_actualizada}
     end
   end
 
@@ -52,20 +69,22 @@ end
 defmodule Libremarket.Compras.Server do
   use GenServer
 
-  def start_link(opts \\ %{}), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  @global_name {:global, __MODULE__}
 
-  def comprar(pid \\ __MODULE__, id_compra), do: GenServer.call(pid, {:comprar, id_compra})
+  def start_link(opts \\ %{}), do: GenServer.start_link(__MODULE__, opts, name: @global_name)
+
+  def comprar(pid \\ __MODULE__, id_compra), do: GenServer.call(@global_name, {:comprar, id_compra})
 
   def seleccionar_producto(pid \\ __MODULE__, producto_id) do
-    GenServer.call(pid, {:seleccionar_producto, producto_id})
+    GenServer.call(@global_name, {:seleccionar_producto, producto_id})
   end
 
   def seleccionar_medio_de_pago(pid \\ __MODULE__, id_compra, medio) do
-    GenServer.cast(pid, {:seleccionar_medio_de_pago, id_compra, medio})
+    GenServer.cast(@global_name, {:seleccionar_medio_de_pago, id_compra, medio})
   end
 
   def seleccionar_forma_de_entrega(pid \\ __MODULE__, id_compra, entrega) do
-    GenServer.cast(pid, {:seleccionar_forma_de_entrega, id_compra, entrega})
+    GenServer.cast(@global_name, {:seleccionar_forma_de_entrega, id_compra, entrega})
   end
 
   @impl true
@@ -87,8 +106,6 @@ defmodule Libremarket.Compras.Server do
     {:noreply, update_in(state, [id_compra], &Map.put(&1, :medio_de_pago, medio))}
   end
 
-  @envios_node :"envios@envios"
-
   @impl true
   def handle_cast({:seleccionar_forma_de_entrega, id_compra, entrega}, state) do
     case Map.fetch(state, id_compra) do
@@ -96,9 +113,11 @@ defmodule Libremarket.Compras.Server do
         {:noreply, state}
 
       {:ok, compra} ->
-        Node.connect(@envios_node)
         {:ok, envio_info} =
-          :erpc.call(@envios_node, Libremarket.Envios.Server, :registrar, [id_compra, entrega])
+          Libremarket.Envios.Server.registrar(
+            id_compra,
+            entrega
+            )
 
         compra_actualizada =
           compra

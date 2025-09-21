@@ -17,19 +17,21 @@ end
 defmodule Libremarket.Ventas.Server do
   use GenServer
 
-  # API
-  def start_link(opts \\ %{}), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  @global_name {:global, __MODULE__}
 
-  def listar_stock(pid \\ __MODULE__), do: GenServer.call(pid, :listar)
+  # API
+  def start_link(opts \\ %{}), do: GenServer.start_link(__MODULE__, opts, name: @global_name)
+
+  def listar_stock(pid \\ __MODULE__), do: GenServer.call(@global_name, :listar)
 
   def reservar(pid \\ __MODULE__, producto_id, cantidad \\ 1),
-    do: GenServer.call(pid, {:reservar, producto_id, cantidad})
+    do: GenServer.call(@global_name, {:reservar, producto_id, cantidad})
 
   def liberar(pid \\ __MODULE__, producto_id, cantidad \\ 1),
-    do: GenServer.call(pid, {:liberar, producto_id, cantidad})
+    do: GenServer.call(@global_name, {:liberar, producto_id, cantidad})
 
   def listar(pid \\ __MODULE__),
-    do: GenServer.call(pid, :listar)
+    do: GenServer.call(@global_name, :listar)
 
   # Callbacks
   @impl true
