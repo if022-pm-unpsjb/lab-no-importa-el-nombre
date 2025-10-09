@@ -8,14 +8,16 @@ defmodule Libremarket.Supervisor do
     Supervisor.start_link(__MODULE__, [], name: __MODULE__)
   end
 
+  @impl true
   def init(_opts) do
-        topologies = [
+    # Topología de libcluster
+    topologies = [
       gossip: [
         strategy: Cluster.Strategy.Gossip,
         config: [
           port: 45892,
           if_addr: "0.0.0.0",
-          multicast_addr: "127.0.0.1",
+          multicast_addr: "192.168.0.192",
           broadcast_only: true,
           secret: "secret"
         ]
@@ -24,14 +26,24 @@ defmodule Libremarket.Supervisor do
 
     server_to_run =
       case System.get_env("SERVER_TO_RUN") do
-        nil -> []
-        server_to_run -> [{String.to_existing_atom(server_to_run), %{}}]
+        nil ->
+          []
+
+        "Elixir.Libremarket.Router" ->
+          port = String.to_integer(System.get_env("PORT") || "4000")
+          [
+            {Plug.Cowboy, scheme: :http, plug: Libremarket.Router,
+             options: [port: port, ip: {0, 0, 0, 0}]}
+          ]
+
+        server_str ->
+          [{String.to_existing_atom(server_str), %{}}]
       end
 
-    childrens = [
-      { Cluster.Supervisor, [topologies, [name: Libremarket.ClusterSupervisor]]},
+    children = [
+      {Cluster.Supervisor, [topologies, [name: Libremarket.ClusterSupervisor]]}
     ] ++ server_to_run
 
-    Supervisor.init(childrens, strategy: :one_for_one)
+    Supervisor.init(children, strategy: :one_for_one)
   end
 end

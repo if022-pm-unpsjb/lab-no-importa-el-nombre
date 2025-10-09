@@ -75,6 +75,8 @@ defmodule Libremarket.Compras.Server do
 
   def comprar(pid \\ __MODULE__, id_compra), do: GenServer.call(@global_name, {:comprar, id_compra})
 
+  def buscar(pid \\ __MODULE__, id_compra), do: GenServer.call(@global_name, {:buscar, id_compra})
+
   def seleccionar_producto(pid \\ __MODULE__, producto_id) do
     GenServer.call(@global_name, {:seleccionar_producto, producto_id})
   end
@@ -98,6 +100,16 @@ defmodule Libremarket.Compras.Server do
       {:ok, compra} ->
         result = Libremarket.Compras.comprar(compra)
       {:reply, result, state}
+    end
+  end
+
+  def handle_call({:buscar, id_compra}, _from, state) do
+    case Map.fetch(state, id_compra) do
+      :error ->
+        {:reply, {:error, :compra_no_encontrada}, state}
+
+      {:ok, compra} ->
+        {:reply, {:ok, compra}, state}
     end
   end
 

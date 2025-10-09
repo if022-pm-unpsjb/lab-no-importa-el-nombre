@@ -68,3 +68,21 @@ services:
       HEX_HOME: /app/hex_home
     command: elixir --sname envios --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  api:
+    image: elixir:alpine
+    container_name: api
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      SERVER_TO_RUN: Elixir.Libremarket.Router
+      PORT: "4000"
+    ports:
+      - "4000:4000"
+    command: elixir --sname api --cookie ${SECRET} -S mix run --no-halt --no-compile
+    stdin_open: true
+    tty: true
