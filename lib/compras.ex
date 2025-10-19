@@ -1,5 +1,5 @@
 defmodule Libremarket.Compras do
-
+  use AMQP
   def comprar(%{id: id_compra, producto_id: producto_id, medio_de_pago: medio, forma_de_entrega: envio} = compra) do
     if confirmar_compra?() do
       case Libremarket.Ventas.Server.reservar(producto_id) do
@@ -10,7 +10,10 @@ defmodule Libremarket.Compras do
           {:error, %{producto_id: producto_id, estado: :sin_stock}}
 
         {:ok, producto_actualizado} ->
+
           # Detectar infracciones
+          #send_message(id_compra, infracciones_queue)
+          #send_message(id, pagos_queue)
           case Libremarket.Infracciones.Server.detectar_infraccion(id_compra) do
             true ->
               Libremarket.Ventas.Server.liberar(producto_id)
@@ -57,7 +60,16 @@ defmodule Libremarket.Compras do
     end
   end
 
-  defp confirmar_compra?(), do: Enum.random(1..100) <= 80
+  defp confirmar_compra?() do
+    # Decidir aleatoriamente si se confirma o no
+    if Enum.random(1..100) <= 80 do
+      true
+    else
+      false
+    end
+  end
+
+
 
   # helper
   defp erpc(node, mod, fun, args) do
@@ -66,8 +78,81 @@ defmodule Libremarket.Compras do
   end
 end
 
+defmodule Libremarket.Compras.Consumer do
+  use GenServer
+  alias AMQP.{Connection, Channel, Queue, Basic}
+  require Logger
+
+  def start_link(_opts) do
+    GenServer.start_link(__MODULE__, %{})
+  end
+
+  @impl true
+  def init(_) do
+    {:ok, conn} = Connection.open("amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz",
+      ssl_options: [verify: :verify_none]
+    )
+
+    {:ok, chan} = Channel.open(conn)
+    Queue.declare(chan, "compras_queue", durable: false)
+    Basic.consume(chan, "compras_queue", nil, no_ack: true)
+
+    Logger.info("Esperando mensajes en compras_queue...")
+    {:ok, %{channel: chan}}
+  end
+
+  @impl true
+def handle_info({:basic_deliver, payload, _meta}, state) do
+  IO.puts("Mensaje recibido en COMPRAS: #{payload}")
+
+  # Decodificamos el mensaje JSON (asegúrate de que el mensaje venga como JSON)
+  case Jason.decode(payload) do
+    {:ok, data} ->
+      id_compra = data["id"] || data[:id]
+
+      # Buscamos si existe una compra con ese ID
+      compras = state[:compras] || %{}
+      compra_actual = Map.get(compras, id_compra, %{})
+
+      # Hacemos merge profundo con los nuevos datos
+      compra_actualizada = Map.merge(compra_actual, Map.new(data))
+
+      # Actualizamos el estado del servidor
+      compras_actualizadas = Map.put(compras, id_compra, compra_actualizada)
+      nuevo_state = Map.put(state, :compras, compras_actualizadas)
+
+      IO.puts("Compra actualizada: #{inspect(compra_actualizada)}")
+      {:noreply, nuevo_state}
+
+    {:error, _} ->
+      IO.puts("Error al decodificar mensaje en COMPRAS.")
+      {:noreply, state}
+  end
+end
+
+  @impl true
+  def handle_info({:basic_consume_ok, _info}, state) do
+    Logger.info("Suscripción a la cola AMQP confirmada.")
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:basic_cancel, _info}, state) do
+    Logger.warning("Suscripción AMQP cancelada.")
+    {:stop, :normal, state}
+  end
+
+  @impl true
+  def handle_info({:basic_cancel_ok, _info}, state) do
+    Logger.info("Cancelación de suscripción AMQP confirmada.")
+    {:noreply, state}
+  end
+end
+
+
 defmodule Libremarket.Compras.Server do
   use GenServer
+  use AMQP
 
   @global_name {:global, __MODULE__}
 
@@ -88,6 +173,40 @@ defmodule Libremarket.Compras.Server do
   def seleccionar_forma_de_entrega(pid \\ __MODULE__, id_compra, entrega) do
     GenServer.cast(@global_name, {:seleccionar_forma_de_entrega, id_compra, entrega})
   end
+
+  #Esta es la funcion que se debe llamar para enviar un mensaje.
+  #Esta hardcodeada para este caso en particular. Pero deberia ser algo "generico".
+  def send_message(pid \\ __MODULE__, message) do
+    {:ok, connection} =
+      Connection.open("amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz",
+        ssl_options: [verify: :verify_none]
+      )
+
+    {:ok, channel} = Channel.open(connection)
+
+    queue_name = "infracciones_queue"
+    Queue.declare(channel, queue_name, durable: false)
+
+    Basic.publish(channel, "", queue_name, to_string(message))
+    IO.puts("Mensaje enviado a #{queue_name}: #{inspect(message)}")
+
+    # Pequeña espera para dar tiempo al broker a procesar (o preferir confirms)
+    Process.sleep(500)
+
+    Channel.close(channel)
+    Connection.close(connection)
+
+    :ok
+  end
+
+
+  @impl true
+  def terminate(_reason, %{chan: chan, conn: conn}) do
+    Channel.close(chan)
+    Connection.close(conn)
+    :ok
+  end
+
 
   @impl true
   def init(_opts), do: {:ok, %{}}
@@ -126,6 +245,7 @@ defmodule Libremarket.Compras.Server do
 
       {:ok, compra} ->
         {:ok, envio_info} =
+          #Libremarket.Compras.Server.send_message(id_compra, entrega)
           Libremarket.Envios.Server.registrar(
             id_compra,
             entrega

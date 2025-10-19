@@ -40,9 +40,19 @@ defmodule Libremarket.Supervisor do
           [{String.to_existing_atom(server_str), %{}}]
       end
 
+
+
+    amqp_to_run =
+      case System.get_env("AMQP_TO_RUN") do
+        nil ->
+          []
+        amqp_str ->
+          [{String.to_existing_atom(amqp_str), %{}}]
+      end
+
     children = [
       {Cluster.Supervisor, [topologies, [name: Libremarket.ClusterSupervisor]]}
-    ] ++ server_to_run
+    ] ++ server_to_run ++ amqp_to_run
 
     Supervisor.init(children, strategy: :one_for_one)
   end
