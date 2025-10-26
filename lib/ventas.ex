@@ -33,6 +33,26 @@ defmodule Libremarket.Ventas.Server do
   def listar(pid \\ __MODULE__),
     do: GenServer.call(@global_name, :listar)
 
+  def send_message(pid \\ __MODULE__, message) do
+    {:ok, connection} =
+      Connection.open("amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz",
+        ssl_options: [verify: :verify_none]
+      )
+
+    {:ok, channel} = Channel.open(connection)
+
+    queue_name = "compras_queue"
+    Queue.declare(channel, queue_name, durable: false)
+
+    Basic.publish(channel, "", queue_name, to_string(message))
+    IO.puts("Mensaje enviado a #{queue_name}: #{inspect(message)}")
+
+    Channel.close(channel)
+    Connection.close(connection)
+
+    :ok
+  end
+
   # Callbacks
   @impl true
   def init(_opts) do
@@ -73,5 +93,90 @@ defmodule Libremarket.Ventas.Server do
         new_state = Map.put(state, id, new_prod)
         {:reply, {:ok, new_prod}, new_state}
     end
+  end
+end
+
+defmodule Libremarket.Ventas.Consumer do
+  use GenServer
+  require Logger
+  alias AMQP.{Queue, Basic}
+
+  @in_queue "ventas_queue"
+  @out_queue "compras_queue"
+
+  def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
+
+  def init(state) do
+    send(self(), :setup)
+    {:ok, state}
+  end
+
+  def handle_info(:setup, state) do
+    case Libremarket.AMQPConn.get_channel() do
+      {:ok, chan} ->
+        Queue.declare(chan, @in_queue, durable: false)
+        {:ok, _ct} = Basic.consume(chan, @in_queue, nil, no_ack: false)
+        Logger.info("Ventas Consumer: escuchando #{@in_queue}")
+        {:noreply, Map.put(state, :chan, chan)}
+      {:error, _} ->
+        Logger.error("Ventas Consumer: sin conexión AMQP, reintentando en 1s")
+        Process.send_after(self(), :setup, 1_000)
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:basic_deliver, payload, meta}, %{chan: chan} = state) do
+    spawn(fn -> process_message(chan, payload, meta) end)
+    {:noreply, state}
+  end
+
+  defp process_message(chan, payload, %{delivery_tag: tag}) do
+    case Jason.decode(payload) do
+      {:ok, %{"id" => id, "producto_id" => producto_id} = _data} ->
+        Logger.info("Ventas: petición reserva id=#{id} producto_id=#{producto_id}")
+
+        case Libremarket.Ventas.Server.reservar(producto_id) do
+          {:ok, producto_actualizado} ->
+            result = %{
+              "id" => id,
+              "reservado" => true,
+              "producto_id" => producto_id,
+              "precio" => producto_actualizado.precio,
+              "nombre" => producto_actualizado.name
+            }
+
+            Libremarket.AMQPHelper.publish_to_queue(@out_queue, result)
+            Basic.ack(chan, tag)
+
+          {:error, :sin_stock} ->
+            result = %{"id" => id, "reservado" => false, "reason" => "sin_stock"}
+            Libremarket.AMQPHelper.publish_to_queue(@out_queue, result)
+            Basic.ack(chan, tag)
+
+          {:error, :producto_invalido} ->
+            result = %{"id" => id, "reservado" => false, "reason" => "producto_invalido"}
+            Libremarket.AMQPHelper.publish_to_queue(@out_queue, result)
+            Basic.ack(chan, tag)
+        end
+
+      {:error, _} ->
+        Logger.error("Ventas: payload inválido #{inspect(payload)}")
+        Basic.reject(chan, tag, requeue: false)
+    end
+  end
+
+  def handle_info({:basic_consume_ok, _}, state) do
+    Logger.info("Suscripción AMQP confirmada correctamente.")
+    {:noreply, state}
+  end
+
+  def handle_info({:basic_cancel, info}, state) do
+    Logger.warning("Suscripción AMQP cancelada: #{inspect(info)}")
+    {:stop, :normal, state}
+  end
+
+  def handle_info({:basic_cancel_ok, _}, state) do
+    Logger.info("Cancelación AMQP confirmada.")
+    {:noreply, state}
   end
 end

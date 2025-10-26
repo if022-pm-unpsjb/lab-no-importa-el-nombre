@@ -3,45 +3,13 @@ defmodule Libremarket.Compras do
 
   def comprar(%{id: id_compra, producto_id: producto_id, forma_de_entrega: envio} = compra) do
     if confirmar_compra?() do
-      case Libremarket.Ventas.Server.reservar(producto_id) do
-        {:error, :producto_invalido} ->
-          {:error, %{producto_id: producto_id, estado: :producto_invalido}}
+      # Marcamos en el Server que estamos esperando reserva
+      GenServer.cast({:global, Libremarket.Compras.Server}, {:actualizar_compra, id_compra, %{estado: :pendiente_reserva, producto_id: producto_id, forma_de_entrega: envio}})
 
-        {:error, :sin_stock} ->
-          {:error, %{producto_id: producto_id, estado: :sin_stock}}
+      :ok = Libremarket.AMQPHelper.publish_to_queue("ventas_queue", %{"id" => id_compra, "producto_id" => producto_id})
 
-        {:ok, producto_actualizado} ->
-          datos_actualizados = %{
-            precio: producto_actualizado.precio,
-            producto: producto_actualizado.name,
-            estado: :en_revision
-          }
-
-          GenServer.cast({:global, Libremarket.Compras.Server}, {:actualizar_compra, id_compra, datos_actualizados})
-
-          # Publicamos asincrónicamente a infracciones
-          :ok =
-            AMQPHelper.publish_to_queue("infracciones_queue", %{
-              "id" => id_compra
-            })
-
-          # Publicamos asincrónicamente a pagos
-          :ok =
-            AMQPHelper.publish_to_queue("pagos_queue", %{
-              "id" => id_compra
-            })
-
-          # Publicamos asincrónicamente a envíos
-          :ok =
-            AMQPHelper.publish_to_queue("envios_queue", %{
-              "id" => id_compra,
-              "tipo_envio" => to_string(envio)
-            })
-
-          {:ok, Map.merge(compra, datos_actualizados)}
-      end
+      {:ok, Map.put(compra, :estado, :pendiente_reserva)}
     else
-      Libremarket.Ventas.Server.liberar(producto_id)
       {:error, Map.put(compra, :estado, :cancelado)}
     end
   end
@@ -93,24 +61,46 @@ defmodule Libremarket.Compras.Consumer do
   defp process_delivery(chan, tag, payload) do
     case Jason.decode(payload) do
       {:ok, %{"id" => id} = map} ->
-        # Eliminamos id y nos quedamos con el/los atributos
-        attrs = Map.delete(map, "id")
+        cond do
+          Map.has_key?(map, "reservado") ->
+            # Mensaje desde Ventas con resultado de reserva
+            if map["reservado"] do
+              # actualizar purchase en server con precio/nombre/estado
+              datos = %{
+                precio: map["precio"],
+                producto: map["nombre"],
+                estado: :en_revision
+              }
 
-        case Map.to_list(attrs) do
-          [{key_str, value}] ->
-            Logger.info("Compras Consumer: recibido #{key_str}=#{inspect(value)} para compra #{id}")
+              GenServer.cast({:global, Libremarket.Compras.Server}, {:actualizar_compra, id, datos})
 
-            # normalizamos la clave a átomo conocido
-            normalized = normalize_key_value(key_str, value)
+              {:ok, compra} = Libremarket.Compras.Server.buscar(id)
+              tipo_envio = compra[:forma_de_entrega]
 
-            # enviamos al Server global
-            GenServer.cast({:global, Libremarket.Compras.Server}, {:actualizar_compra, id, normalized})
+              # Ahora sí notificar a los otros módulos (asincrónico)
+              Libremarket.AMQPHelper.publish_to_queue("infracciones_queue", %{"id" => id})
+              Libremarket.AMQPHelper.publish_to_queue("pagos_queue", %{"id" => id})
+              Libremarket.AMQPHelper.publish_to_queue("envios_queue", %{"id" => id, "tipo_envio" => to_string(tipo_envio)})
+            else
+              # Reserva fallida -> marcar la compra como cancelada/ sin stock
+              motivo = Map.get(map, "reason", "sin_stock")
+              GenServer.cast({:global, Libremarket.Compras.Server}, {:actualizar_compra, id, %{estado: :sin_stock, reserva_motivo: motivo}})
+            end
 
-          [] ->
-            Logger.warn("Compras Consumer: mensaje vacío o sin atributo relevante #{inspect(map)}")
+          # handling para pago/infraccion/envio, normalizar y reenviar al server
+          Map.has_key?(map, "infraccion") or Map.has_key?(map, "pago") or Map.has_key?(map, "costo") or Map.has_key?(map, "costo_envio") ->
+            attrs = Map.delete(map, "id")
+            case Map.to_list(attrs) do
+              [{key_str, value}] ->
+                Logger.info("Compras Consumer: recibido #{key_str}=#{inspect(value)} para compra #{id}")
+                normalized = normalize_key_value(key_str, value)
+                GenServer.cast({:global, Libremarket.Compras.Server}, {:actualizar_compra, id, normalized})
+              _ ->
+                Logger.warn("Compras Consumer: mensaje con atributos inesperados #{inspect(map)}")
+            end
 
-          _ ->
-            Logger.warn("Compras Consumer: mensaje con múltiples atributos inesperados #{inspect(map)}")
+          true ->
+            Logger.warn("Compras Consumer: mensaje desconocido #{inspect(map)}")
         end
 
         Basic.ack(chan, tag)
@@ -203,18 +193,25 @@ defmodule Libremarket.Compras.Server do
     compra_actual = Map.get(state, id, %{})
     compra_actualizada = Map.merge(compra_actual, nuevos_campos)
 
-    # Aplicamos reglas de negocio según los campos recibidos
     compra_final =
       cond do
-        Map.get(nuevos_campos, "infraccion") == true or Map.get(nuevos_campos, :infraccion) == true ->
+        # Si no hay stock, la compra se cancela definitivamente
+        compra_actualizada[:estado] == :sin_stock ->
+          Map.put(compra_actualizada, :estado, :sin_stock)
+
+        # Si está en proceso de reserva, no publicamos todavía nada
+        compra_actualizada[:estado] == :pendiente_reserva ->
+          compra_actualizada
+
+        # Si falló infracción o pago
+        compra_actualizada[:infraccion] == true ->
           Map.put(compra_actualizada, :estado, :error_infracciones)
 
-        Map.get(nuevos_campos, "pago") == false or Map.get(nuevos_campos, :pago) == false ->
+        compra_actualizada[:pago] == false ->
           Map.put(compra_actualizada, :estado, :error_pago)
 
+        # Si ya pasó infracciones y pago correctamente
         compra_actualizada[:estado] == :en_revision and
-            Map.has_key?(compra_actualizada, :pago) and
-            Map.has_key?(compra_actualizada, :infraccion) and
             compra_actualizada[:pago] == true and
             compra_actualizada[:infraccion] == false ->
           Map.put(compra_actualizada, :estado, :finalizado)
@@ -223,7 +220,7 @@ defmodule Libremarket.Compras.Server do
           compra_actualizada
       end
 
-    Logger.info("Compras Server: actualizando compra #{inspect(id)} con #{inspect(nuevos_campos)}")
+    Logger.info("Compras Server: actualizando compra #{inspect(id)} con #{inspect(compra_final)}")
     {:noreply, Map.put(state, id, compra_final)}
   end
 
