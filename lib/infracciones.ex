@@ -11,87 +11,73 @@ end
 defmodule Libremarket.Infracciones.Consumer do
   use GenServer
   require Logger
-  alias AMQP.{Connection, Channel, Queue, Basic}
+  alias AMQP.{Queue, Basic}
 
-  @queue "infracciones_queue"
+  @in_queue "infracciones_queue"
+  @out_queue "compras_queue"  # resultados van aquí
 
-  def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
+  def start_link(_opts), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
 
-  @impl true
   def init(state) do
-    {:ok, conn} =
-      Connection.open("amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz",
-        ssl_options: [verify: :verify_none]
-      )
-
-    {:ok, chan} = Channel.open(conn)
-    Queue.declare(chan, @queue, durable: false)
-    Basic.consume(chan, @queue, nil, no_ack: true)
-
-    Logger.info("Esperando mensajes en #{@queue}...")
-    {:ok, %{conn: conn, channel: chan}}
+    send(self(), :setup)
+    {:ok, state}
   end
 
-  @impl true
-  # Mensaje entrante desde RabbitMQ
-  def handle_info({:basic_deliver, payload, _meta}, state) do
-    Logger.info("Mensaje recibido en infracciones: #{inspect(payload)}")
-
-    infraccion = Libremarket.Infracciones.detectar_infraccion()
-    Logger.info("Resultado infracción: #{inspect(infraccion)}")
-
-    # Actualizamos estado local (si querés guardar historial)
-    new_state = Map.update(state, :messages, [%{payload: payload, infraccion: infraccion}], fn msgs ->
-      [%{payload: payload, infraccion: infraccion} | msgs]
-    end)
-
-    # Reenviamos mensaje a compras
-    Libremarket.Infracciones.Server.send_message(infraccion)
-
-    {:noreply, new_state}
+  def handle_info(:setup, state) do
+    case Libremarket.AMQPConn.get_channel() do
+      {:ok, chan} ->
+        Queue.declare(chan, @in_queue, durable: false)
+        {:ok, _ct} = Basic.consume(chan, @in_queue, nil, no_ack: false)
+        Logger.info("Infracciones listening on #{@in_queue}")
+        {:noreply, Map.put(state, :chan, chan)}
+      {:error, _} ->
+        Logger.error("Infracciones Consumer: sin conexion AMQP, reintentando en 1s")
+        Process.send_after(self(), :setup, 1_000)
+        {:noreply, state}
+    end
   end
 
-  @impl true
-  def handle_info({:basic_consume_ok, _info}, state) do
-    Logger.info("Suscripción a la cola AMQP confirmada.")
+  def handle_info({:basic_deliver, payload, meta}, %{chan: chan} = state) do
+    Logger.debug("Infracciones: basic_deliver raw payload=#{inspect(payload)} meta=#{inspect(meta)}")
+    spawn(fn -> process_message(chan, payload, meta) end)
     {:noreply, state}
   end
 
-  @impl true
-  def handle_info({:basic_cancel, _info}, state) do
-    Logger.warning("Suscripción AMQP cancelada.")
+  defp process_message(chan, payload, %{delivery_tag: tag}) do
+    case Jason.decode(payload) do
+      {:ok, %{"id" => id} = data} ->
+        Logger.info("Infracciones: procesando id=#{id} payload=#{inspect(data)}")
+
+        infr = Libremarket.Infracciones.detectar_infraccion()
+
+        result = %{"id" => id, "infraccion" => infr}
+        Libremarket.AMQPHelper.publish_to_queue(@out_queue, result)
+        AMQP.Basic.ack(chan, tag)
+
+      {:error, _} ->
+        Logger.error("Infracciones: payload mal formado #{inspect(payload)}")
+        AMQP.Basic.reject(chan, tag, requeue: false)
+    end
+  end
+
+  # Confirmación de que el consumidor se suscribió correctamente
+  def handle_info({:basic_consume_ok, _info}, state) do
+    Logger.info("Suscripción AMQP confirmada correctamente.")
+    {:noreply, state}
+  end
+
+  # Aviso de cancelación por parte del broker
+  def handle_info({:basic_cancel, info}, state) do
+    Logger.warning("Suscripción AMQP cancelada: #{inspect(info)}")
     {:stop, :normal, state}
   end
 
-  @impl true
+  # Confirmación de cancelación
   def handle_info({:basic_cancel_ok, _info}, state) do
-    Logger.info("Cancelación de suscripción AMQP confirmada.")
+    Logger.info("Cancelación AMQP confirmada.")
     {:noreply, state}
   end
-
-  @impl true
-  def terminate(_reason, %{channel: chan, conn: conn}) do
-    Logger.info("Cerrando canal y conexión AMQP del consumer")
-    try do
-      Channel.close(chan)
-    rescue
-      _ -> :ok
-    end
-
-    try do
-      Connection.close(conn)
-    rescue
-      _ -> :ok
-    end
-
-    :ok
-  end
-
-
-
-
 end
-
 
 defmodule Libremarket.Infracciones.Server do
   @moduledoc """

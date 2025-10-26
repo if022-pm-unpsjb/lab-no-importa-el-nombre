@@ -51,7 +51,8 @@ defmodule Libremarket.Supervisor do
       end
 
     children = [
-      {Cluster.Supervisor, [topologies, [name: Libremarket.ClusterSupervisor]]}
+      {Cluster.Supervisor, [topologies, [name: Libremarket.ClusterSupervisor]]},
+      Libremarket.AMQPConn
     ] ++ server_to_run ++ amqp_to_run
 
     Supervisor.init(children, strategy: :one_for_one)

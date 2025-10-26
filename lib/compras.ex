@@ -1,6 +1,7 @@
 defmodule Libremarket.Compras do
-  use AMQP
-  def comprar(%{id: id_compra, producto_id: producto_id, medio_de_pago: medio, forma_de_entrega: envio} = compra) do
+  alias Libremarket.AMQPHelper
+
+  def comprar(%{id: id_compra, producto_id: producto_id, forma_de_entrega: envio} = compra) do
     if confirmar_compra?() do
       case Libremarket.Ventas.Server.reservar(producto_id) do
         {:error, :producto_invalido} ->
@@ -10,53 +11,38 @@ defmodule Libremarket.Compras do
           {:error, %{producto_id: producto_id, estado: :sin_stock}}
 
         {:ok, producto_actualizado} ->
+          datos_actualizados = %{
+            precio: producto_actualizado.precio,
+            producto: producto_actualizado.name,
+            estado: :en_revision
+          }
 
-          # Detectar infracciones
-          #send_message(id_compra, infracciones_queue)
-          #send_message(id, pagos_queue)
-          case Libremarket.Infracciones.Server.detectar_infraccion(id_compra) do
-            true ->
-              Libremarket.Ventas.Server.liberar(producto_id)
-              compra_actualizada =
-                  compra
-                  |> Map.put(:nombre, producto_actualizado.name)
-                  |> Map.put(:precio, producto_actualizado.precio)
-                  |> Map.put(:estado, :infraccion_detectada)
+          GenServer.cast({:global, Libremarket.Compras.Server}, {:actualizar_compra, id_compra, datos_actualizados})
 
-              {:error, compra_actualizada}
+          # Publicamos asincrónicamente a infracciones
+          :ok =
+            AMQPHelper.publish_to_queue("infracciones_queue", %{
+              "id" => id_compra
+            })
 
-            false ->
-              # Autorizar pago
-              case Libremarket.Pagos.Server.autorizar_pago(id_compra) do
-                false ->
-                  # Si el pago se rechaza, se libera producto
-                  Libremarket.Ventas.Server.liberar(producto_id)
-                  compra_actualizada =
-                    compra
-                      |> Map.put(:nombre, producto_actualizado.name)
-                      |> Map.put(:precio, producto_actualizado.precio)
-                      |> Map.put(:estado, :pago_rechazado)
+          # Publicamos asincrónicamente a pagos
+          :ok =
+            AMQPHelper.publish_to_queue("pagos_queue", %{
+              "id" => id_compra
+            })
 
-                  {:error, compra_actualizada}
+          # Publicamos asincrónicamente a envíos
+          :ok =
+            AMQPHelper.publish_to_queue("envios_queue", %{
+              "id" => id_compra,
+              "tipo_envio" => to_string(envio)
+            })
 
-                true ->
-                  compra_actualizada =
-                    compra
-                    |> Map.put(:nombre, producto_actualizado.name)
-                    |> Map.put(:precio, producto_actualizado.precio)
-                    |> Map.put(:estado, :completada)
-
-                  {:ok, compra_actualizada}
-              end
-          end
+          {:ok, Map.merge(compra, datos_actualizados)}
       end
     else
       Libremarket.Ventas.Server.liberar(producto_id)
-        compra_actualizada =
-        compra
-        |> Map.put(:estado, :cancelado)
-
-      {:error, compra_actualizada}
+      {:error, Map.put(compra, :estado, :cancelado)}
     end
   end
 
@@ -68,91 +54,104 @@ defmodule Libremarket.Compras do
       false
     end
   end
-
-
-
-  # helper
-  defp erpc(node, mod, fun, args) do
-    Node.connect(node)
-    :erpc.call(node, mod, fun, args)
-  end
 end
 
 defmodule Libremarket.Compras.Consumer do
   use GenServer
-  alias AMQP.{Connection, Channel, Queue, Basic}
   require Logger
+  alias AMQP.{Queue, Basic}
 
-  def start_link(_opts) do
-    GenServer.start_link(__MODULE__, %{})
+  @queue "compras_queue"
+
+  def start_link(_), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
+
+  def init(state) do
+    send(self(), :setup)
+    {:ok, %{chan: nil}}
   end
 
-  @impl true
-  def init(_) do
-    {:ok, conn} = Connection.open("amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz",
-      ssl_options: [verify: :verify_none]
-    )
-
-    {:ok, chan} = Channel.open(conn)
-    Queue.declare(chan, "compras_queue", durable: false)
-    Basic.consume(chan, "compras_queue", nil, no_ack: true)
-
-    Logger.info("Esperando mensajes en compras_queue...")
-    {:ok, %{channel: chan}}
+  def handle_info(:setup, state) do
+    case Libremarket.AMQPConn.get_channel() do
+      {:ok, chan} ->
+        Queue.declare(chan, @queue, durable: false)
+        {:ok, _ctag} = Basic.consume(chan, @queue, nil, no_ack: false)
+        Logger.info("Compras Consumer: escuchando en #{@queue}")
+        {:noreply, Map.put(state, :chan, chan)}
+      {:error, _} ->
+        Logger.error("Compras Consumer: sin conexion AMQP, reintentando")
+        Process.send_after(self(), :setup, 1000)
+        {:noreply, state}
+    end
   end
 
-  @impl true
-def handle_info({:basic_deliver, payload, _meta}, state) do
-  IO.puts("Mensaje recibido en COMPRAS: #{payload}")
-
-  # Decodificamos el mensaje JSON (asegúrate de que el mensaje venga como JSON)
-  case Jason.decode(payload) do
-    {:ok, data} ->
-      id_compra = data["id"] || data[:id]
-
-      # Buscamos si existe una compra con ese ID
-      compras = state[:compras] || %{}
-      compra_actual = Map.get(compras, id_compra, %{})
-
-      # Hacemos merge profundo con los nuevos datos
-      compra_actualizada = Map.merge(compra_actual, Map.new(data))
-
-      # Actualizamos el estado del servidor
-      compras_actualizadas = Map.put(compras, id_compra, compra_actualizada)
-      nuevo_state = Map.put(state, :compras, compras_actualizadas)
-
-      IO.puts("Compra actualizada: #{inspect(compra_actualizada)}")
-      {:noreply, nuevo_state}
-
-    {:error, _} ->
-      IO.puts("Error al decodificar mensaje en COMPRAS.")
-      {:noreply, state}
-  end
-end
-
-  @impl true
-  def handle_info({:basic_consume_ok, _info}, state) do
-    Logger.info("Suscripción a la cola AMQP confirmada.")
+  # Mensajes AMQP
+  def handle_info({:basic_deliver, payload, meta}, %{chan: chan} = state) do
+    spawn(fn -> process_delivery(chan, meta.delivery_tag, payload) end)
     {:noreply, state}
   end
 
-  @impl true
-  def handle_info({:basic_cancel, _info}, state) do
-    Logger.warning("Suscripción AMQP cancelada.")
+  defp process_delivery(chan, tag, payload) do
+    case Jason.decode(payload) do
+      {:ok, %{"id" => id} = map} ->
+        # Eliminamos id y nos quedamos con el/los atributos
+        attrs = Map.delete(map, "id")
+
+        case Map.to_list(attrs) do
+          [{key_str, value}] ->
+            Logger.info("Compras Consumer: recibido #{key_str}=#{inspect(value)} para compra #{id}")
+
+            # normalizamos la clave a átomo conocido
+            normalized = normalize_key_value(key_str, value)
+
+            # enviamos al Server global
+            GenServer.cast({:global, Libremarket.Compras.Server}, {:actualizar_compra, id, normalized})
+
+          [] ->
+            Logger.warn("Compras Consumer: mensaje vacío o sin atributo relevante #{inspect(map)}")
+
+          _ ->
+            Logger.warn("Compras Consumer: mensaje con múltiples atributos inesperados #{inspect(map)}")
+        end
+
+        Basic.ack(chan, tag)
+
+      {:error, _} ->
+        Logger.error("Compras Consumer: payload inválido #{inspect(payload)}")
+        Basic.reject(chan, tag, requeue: false)
+    end
+  end
+
+  defp normalize_key_value("pago", value), do: %{pago: value}
+  defp normalize_key_value("infraccion", value), do: %{infraccion: value}
+  defp normalize_key_value("costo", value), do: %{costo_envio: value}
+  defp normalize_key_value("costo_envio", value), do: %{costo_envio: value}
+  defp normalize_key_value("tipo_envio", value), do: %{tipo_envio: value}
+
+  # Confirmación de que el consumidor se suscribió correctamente
+  def handle_info({:basic_consume_ok, _info}, state) do
+    Logger.info("Suscripción AMQP confirmada correctamente.")
+    {:noreply, state}
+  end
+
+  # Aviso de cancelación por parte del broker
+  def handle_info({:basic_cancel, info}, state) do
+    Logger.warning("Suscripción AMQP cancelada: #{inspect(info)}")
     {:stop, :normal, state}
   end
 
-  @impl true
+  # Confirmación de cancelación
   def handle_info({:basic_cancel_ok, _info}, state) do
-    Logger.info("Cancelación de suscripción AMQP confirmada.")
+    Logger.info("Cancelación AMQP confirmada.")
     {:noreply, state}
   end
 end
-
 
 defmodule Libremarket.Compras.Server do
   use GenServer
   use AMQP
+  require Logger
+  alias Libremarket.AMQPHelper
+  alias AMQP.{Connection, Channel, Queue, Basic}
 
   @global_name {:global, __MODULE__}
 
@@ -199,26 +198,47 @@ defmodule Libremarket.Compras.Server do
     :ok
   end
 
-
   @impl true
-  def terminate(_reason, %{chan: chan, conn: conn}) do
-    Channel.close(chan)
-    Connection.close(conn)
-    :ok
+  def handle_cast({:actualizar_compra, id, nuevos_campos}, state) do
+    compra_actual = Map.get(state, id, %{})
+    compra_actualizada = Map.merge(compra_actual, nuevos_campos)
+
+    # Aplicamos reglas de negocio según los campos recibidos
+    compra_final =
+      cond do
+        Map.get(nuevos_campos, "infraccion") == true or Map.get(nuevos_campos, :infraccion) == true ->
+          Map.put(compra_actualizada, :estado, :error_infracciones)
+
+        Map.get(nuevos_campos, "pago") == false or Map.get(nuevos_campos, :pago) == false ->
+          Map.put(compra_actualizada, :estado, :error_pago)
+
+        compra_actualizada[:estado] == :en_revision and
+            Map.has_key?(compra_actualizada, :pago) and
+            Map.has_key?(compra_actualizada, :infraccion) and
+            compra_actualizada[:pago] == true and
+            compra_actualizada[:infraccion] == false ->
+          Map.put(compra_actualizada, :estado, :finalizado)
+
+        true ->
+          compra_actualizada
+      end
+
+    Logger.info("Compras Server: actualizando compra #{inspect(id)} con #{inspect(nuevos_campos)}")
+    {:noreply, Map.put(state, id, compra_final)}
   end
 
+  def terminate(reason, state) do
+    IO.inspect(reason, label: "Terminating GenServer due to")
+    :ok
+  end
 
   @impl true
   def init(_opts), do: {:ok, %{}}
 
   def handle_call({:comprar, id_compra}, _from, state) do
     case Map.fetch(state, id_compra) do
-      :error ->
-        {:reply, {:error, :compra_no_encontrada}, state}
-
-      {:ok, compra} ->
-        result = Libremarket.Compras.comprar(compra)
-      {:reply, result, state}
+      {:ok, compra} -> {:reply, Libremarket.Compras.comprar(compra), state}
+      :error -> {:reply, {:error, :no_encontrada}, state}
     end
   end
 
@@ -228,7 +248,7 @@ defmodule Libremarket.Compras.Server do
         {:reply, {:error, :compra_no_encontrada}, state}
 
       {:ok, compra} ->
-        {:reply, {:ok, compra}, state}
+        {:reply, Map.fetch(state, id_compra), state}
     end
   end
 
@@ -239,25 +259,7 @@ defmodule Libremarket.Compras.Server do
 
   @impl true
   def handle_cast({:seleccionar_forma_de_entrega, id_compra, entrega}, state) do
-    case Map.fetch(state, id_compra) do
-      :error ->
-        {:noreply, state}
-
-      {:ok, compra} ->
-        {:ok, envio_info} =
-          #Libremarket.Compras.Server.send_message(id_compra, entrega)
-          Libremarket.Envios.Server.registrar(
-            id_compra,
-            entrega
-            )
-
-        compra_actualizada =
-          compra
-          |> Map.put(:forma_de_entrega, envio_info.tipo_envio)
-          |> Map.put(:costo_envio, envio_info.costo_envio)
-
-        {:noreply, Map.put(state, id_compra, compra_actualizada)}
-    end
+    {:noreply, update_in(state, [id_compra], &Map.put(&1, :forma_de_entrega, entrega))}
   end
 
   @impl true
@@ -265,5 +267,10 @@ defmodule Libremarket.Compras.Server do
     id_compra = :erlang.unique_integer([:positive])
     compra = %{id: id_compra, producto_id: producto_id, medio_de_pago: nil, forma_de_entrega: nil}
     {:reply, {:ok, id_compra}, Map.put(state, id_compra, compra)}
+  end
+
+  defp marcar_finalizada(compra) do
+    compra
+    |> Map.put("estado", :finalizado)
   end
 end
