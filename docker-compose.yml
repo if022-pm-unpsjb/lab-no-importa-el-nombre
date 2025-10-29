@@ -55,6 +55,7 @@ services:
     working_dir: /app
     network_mode: "host"
     environment:
+      ROLE: PRINCIPAL
       SERVER_TO_RUN: Elixir.Libremarket.Infracciones.Server
       AMQP_TO_RUN: Elixir.Libremarket.Infracciones.Consumer
       MIX_HOME: /app/mix_home
