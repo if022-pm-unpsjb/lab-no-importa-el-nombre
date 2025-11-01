@@ -17,7 +17,7 @@ defmodule Libremarket.Supervisor do
         config: [
           port: 45892,
           if_addr: "0.0.0.0",
-          multicast_addr: "192.168.0.192",
+          multicast_addr: "192.168.21.217",
           broadcast_only: true,
           secret: "secret"
         ]
@@ -39,8 +39,6 @@ defmodule Libremarket.Supervisor do
         server_str ->
           [{String.to_existing_atom(server_str), %{}}]
       end
-
-
 
     amqp_to_run =
       case System.get_env("AMQP_TO_RUN") do

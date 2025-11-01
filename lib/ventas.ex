@@ -33,26 +33,6 @@ defmodule Libremarket.Ventas.Server do
   def listar(pid \\ __MODULE__),
     do: GenServer.call(@global_name, :listar)
 
-  def send_message(pid \\ __MODULE__, message) do
-    {:ok, connection} =
-      Connection.open("amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz",
-        ssl_options: [verify: :verify_none]
-      )
-
-    {:ok, channel} = Channel.open(connection)
-
-    queue_name = "compras_queue"
-    Queue.declare(channel, queue_name, durable: false)
-
-    Basic.publish(channel, "", queue_name, to_string(message))
-    IO.puts("Mensaje enviado a #{queue_name}: #{inspect(message)}")
-
-    Channel.close(channel)
-    Connection.close(connection)
-
-    :ok
-  end
-
   # Callbacks
   @impl true
   def init(_opts) do
@@ -107,8 +87,14 @@ defmodule Libremarket.Ventas.Consumer do
   def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
 
   def init(state) do
-    send(self(), :setup)
-    {:ok, state}
+    role = System.get_env("ROLE") || "PRINCIPAL"
+    if role == "PRINCIPAL" do
+      send(self(), :setup)
+      {:ok, Map.put(state, :role, role)}
+    else
+      Logger.info("Ventas.Consumer: modo REPLICA -> no me suscribo a AMQP.")
+      {:ok, Map.put(state, :role, role)}
+    end
   end
 
   def handle_info(:setup, state) do

@@ -31,25 +31,60 @@ services:
     command: elixir --sname ventas --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
-  pagos:
+  pagos1:
     image: elixir:1.15.7-alpine
-    container_name: pagos
+    container_name: pagos1
     volumes:
       - ./:/app
     working_dir: /app
     network_mode: "host"
     environment:
+      ROLE: PRINCIPAL
       SERVER_TO_RUN: Elixir.Libremarket.Pagos.Server
       AMQP_TO_RUN: Elixir.Libremarket.Pagos.Consumer
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
-    command: elixir --sname pagos --cookie ${SECRET} -S mix run --no-halt --no-compile
+    command: elixir --sname pagos1 --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
-  infracciones:
+  pagos2:
     image: elixir:1.15.7-alpine
-    container_name: infracciones
+    container_name: pagos2
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      ROLE: REPLICA
+      SERVER_TO_RUN: Elixir.Libremarket.Pagos.Server
+      AMQP_TO_RUN: Elixir.Libremarket.Pagos.Consumer
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
+    command: elixir --sname pagos2 --cookie ${SECRET} -S mix run --no-halt --no-compile
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  pagos3:
+    image: elixir:1.15.7-alpine
+    container_name: pagos3
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      ROLE: REPLICA
+      SERVER_TO_RUN: Elixir.Libremarket.Pagos.Server
+      AMQP_TO_RUN: Elixir.Libremarket.Pagos.Consumer
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
+    command: elixir --sname pagos3 --cookie ${SECRET} -S mix run --no-halt --no-compile
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  infracciones1:
+    image: elixir:1.15.7-alpine
+    container_name: infracciones1
     volumes:
       - ./:/app
     working_dir: /app
@@ -61,7 +96,41 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
-    command: elixir --sname infracciones --cookie ${SECRET} -S mix run --no-halt --no-compile
+    command: elixir --sname infracciones1 --cookie ${SECRET} -S mix run --no-halt --no-compile
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  infracciones2:
+    image: elixir:1.15.7-alpine
+    container_name: infracciones2
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      ROLE: REPLICA
+      SERVER_TO_RUN: Elixir.Libremarket.Infracciones.Server
+      AMQP_TO_RUN: Elixir.Libremarket.Infracciones.Consumer
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
+    command: elixir --sname infracciones2 --cookie ${SECRET} -S mix run --no-halt --no-compile
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  infracciones3:
+    image: elixir:1.15.7-alpine
+    container_name: infracciones3
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      ROLE: REPLICA
+      SERVER_TO_RUN: Elixir.Libremarket.Infracciones.Server
+      AMQP_TO_RUN: Elixir.Libremarket.Infracciones.Consumer
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
+    command: elixir --sname infracciones3 --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   envios:

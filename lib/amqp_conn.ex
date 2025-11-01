@@ -8,11 +8,17 @@ defmodule Libremarket.AMQPConn do
   def get_channel(), do: GenServer.call(__MODULE__, :get_channel)
 
   def init(_) do
-    url = System.get_env("CLOUDAMQP_URL")
-    state = %{url: url, conn: nil}
-    # intentamos conectar en background
-    send(self(), :connect)
-    {:ok, state}
+    role = System.get_env("ROLE") || "PRINCIPAL"
+      if role == "REPLICA" do
+        Logger.info("AMQPConn: ROLE=REPLICA -> no inicializo conexión AMQP")
+        {:ok, :no_amqp}
+      else
+        url = System.get_env("CLOUDAMQP_URL")
+        state = %{url: url, conn: nil}
+        # intentamos conectar en background
+        send(self(), :connect)
+        {:ok, state}
+      end
   end
 
   def handle_info(:connect, %{url: nil} = state) do

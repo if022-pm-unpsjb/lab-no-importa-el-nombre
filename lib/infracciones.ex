@@ -19,8 +19,15 @@ defmodule Libremarket.Infracciones.Consumer do
   def start_link(_opts), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
 
   def init(state) do
-    send(self(), :setup)
-    {:ok, state}
+    # Solo el PRIMARIO debe suscribirse a AMQP
+    role = System.get_env("ROLE") || "PRINCIPAL"
+    if role == "PRINCIPAL" do
+      send(self(), :setup)
+      {:ok, Map.put(state, :role, role)}
+    else
+      Logger.info("Infracciones.Consumer: modo REPLICA -> no me suscribo a AMQP.")
+      {:ok, Map.put(state, :role, role)}
+    end
   end
 
   def handle_info(:setup, state) do
@@ -38,7 +45,6 @@ defmodule Libremarket.Infracciones.Consumer do
   end
 
   def handle_info({:basic_deliver, payload, meta}, %{chan: chan} = state) do
-    Logger.debug("Infracciones: basic_deliver raw payload=#{inspect(payload)} meta=#{inspect(meta)}")
     spawn(fn -> process_message(chan, payload, meta) end)
     {:noreply, state}
   end
@@ -47,12 +53,20 @@ defmodule Libremarket.Infracciones.Consumer do
     case Jason.decode(payload) do
       {:ok, %{"id" => id} = data} ->
         Logger.info("Infracciones: procesando id=#{id} payload=#{inspect(data)}")
-
         infr = Libremarket.Infracciones.detectar_infraccion()
 
-        result = %{"id" => id, "infraccion" => infr}
-        Libremarket.AMQPHelper.publish_to_queue(@out_queue, result)
-        AMQP.Basic.ack(chan, tag)
+        # Aquí llamamos al Server primario para aplicar+replicar
+        case Libremarket.Infracciones.Server.apply_and_replicate(id, infr) do
+          :ok ->
+            # Solo cuando primario confirmó replicación (o intentó) publicamos a compras_queue
+            Libremarket.AMQPHelper.publish_to_queue(@out_queue, %{"id" => id, "infraccion" => infr})
+            AMQP.Basic.ack(chan, tag)
+
+          {:error, reason} ->
+            Logger.warn("Infracciones: replicación falló #{inspect(reason)} — publicando de todas formas.")
+            Libremarket.AMQPHelper.publish_to_queue(@out_queue, %{"id" => id, "infraccion" => infr})
+            AMQP.Basic.ack(chan, tag)
+        end
 
       {:error, _} ->
         Logger.error("Infracciones: payload mal formado #{inspect(payload)}")
@@ -86,6 +100,7 @@ defmodule Libremarket.Infracciones.Server do
 
   use GenServer
   use AMQP
+  require Logger
 
   @global_name {:global, __MODULE__}
 
@@ -95,7 +110,9 @@ defmodule Libremarket.Infracciones.Server do
   Crea un nuevo servidor de Infracciones
   """
   def start_link(opts \\ %{}) do
-    GenServer.start_link(__MODULE__, opts, name: @global_name)
+    role = System.get_env("ROLE") || "PRINCIPAL"
+    name = if role == "PRINCIPAL", do: @global_name, else: __MODULE__
+    GenServer.start_link(__MODULE__, %{role: role}, name: name)
   end
 
   def detectar_infraccion(pid \\ __MODULE__, id_compra) do
@@ -106,27 +123,17 @@ defmodule Libremarket.Infracciones.Server do
     GenServer.call(@global_name, :listar_infracciones)
   end
 
-  def send_message(pid \\ __MODULE__, message) do
-    {:ok, connection} =
-      Connection.open("amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz",
-        ssl_options: [verify: :verify_none]
-      )
+  def apply_and_replicate(id_compra, infr) do
+    # llamamos al servidor global (esto funcionará si estamos en el PRIMARIO o desde el Consumer del primario)
+    GenServer.call(@global_name, {:apply_and_replicate, id_compra, infr}, 10_000)
+  catch
+    :exit, reason ->
+      Logger.error("Infracciones.Server.apply_and_replicate: fallo call al servidor global #{inspect(reason)}")
+      {:error, reason}
+  end
 
-    {:ok, channel} = Channel.open(connection)
-
-    queue_name = "compras_queue"
-    Queue.declare(channel, queue_name, durable: false)
-
-    Basic.publish(channel, "", queue_name, to_string(message))
-    IO.puts("Mensaje enviado a #{queue_name}: #{inspect(message)}")
-
-    # Pequeña espera para dar tiempo al broker a procesar (o preferir confirms)
-    Process.sleep(500)
-
-    Channel.close(channel)
-    Connection.close(connection)
-
-    :ok
+  def replica_apply(id_compra, infr) do
+    GenServer.call(__MODULE__, {:replica_update, id_compra, infr}, 5_000)
   end
 
   # Callbacks
@@ -136,7 +143,8 @@ defmodule Libremarket.Infracciones.Server do
   """
   @impl true
   def init(state) do
-    {:ok, %{}}
+    # state: map id_compra -> boolean or info
+    {:ok, Map.put(state, :storage, %{})}
   end
 
   @doc """
@@ -157,4 +165,63 @@ defmodule Libremarket.Infracciones.Server do
     {:reply, state, state}
   end
 
+  @impl true
+  def handle_call({:apply_and_replicate, id, infr}, _from, state) do
+    storage = Map.get(state, :storage, %{})
+    new_storage = Map.put(storage, id, infr)
+    state2 = Map.put(state, :storage, new_storage)
+
+    replica_nodes = get_replica_nodes()
+    Logger.info("Infracciones.Server (primario) replica_nodes=#{inspect(replica_nodes)}")
+
+    # Si no hay réplicas, no hacemos RPC (evita bloquear)
+    if replica_nodes == [] do
+      Logger.info("Infracciones.Server: no hay réplicas detectadas -> aplicando local y devolviendo :ok")
+      {:reply, :ok, state2}
+    else
+      results =
+        replica_nodes
+        |> Enum.map(fn node ->
+          try do
+            :rpc.call(node, Libremarket.Infracciones.Server, :replica_apply, [id, infr], 5_000)
+          catch
+            :exit, reason ->
+              Logger.warn("RPC exit al nodo #{inspect(node)} -> #{inspect(reason)}")
+              {:badrpc, reason}
+            :error, reason ->
+              Logger.warn("RPC error al nodo #{inspect(node)} -> #{inspect(reason)}")
+              {:badrpc, reason}
+          end
+        end)
+
+      Logger.info("Infracciones.Server: resultado replicación=#{inspect(results)}")
+
+      if Enum.all?(results, &(&1 == :ok)) do
+        {:reply, :ok, state2}
+      else
+        Logger.warn("Infracciones.Server: replicación incompleta, resultados=#{inspect(results)}")
+        {:reply, {:error, :replication_failed, results}, state2}
+      end
+    end
+  end
+
+  @impl true
+  def handle_call({:replica_update, id, infr}, _from, state) do
+    storage = Map.get(state, :storage, %{})
+    new_storage = Map.put(storage, id, %{infraccion: infr, ts: :os.system_time(:millisecond)})
+    state2 = Map.put(state, :storage, new_storage)
+
+    Logger.info("Infracciones REPLICA #{inspect(node())}: replica_update id=#{inspect(id)} infraccion=#{inspect(infr)} ts=#{inspect(DateTime.utc_now())}")
+
+    # ACK al primario devolviendo :ok
+    {:reply, :ok, state2}
+  end
+
+  defp get_replica_nodes() do
+    Node.list()
+    |> Enum.filter(fn node ->
+      node_str = Atom.to_string(node)
+      String.starts_with?(node_str, "infracciones")
+    end)
+  end
 end
