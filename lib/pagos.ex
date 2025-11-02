@@ -131,11 +131,24 @@ defmodule Libremarket.Pagos.Server do
   end
 
   defp get_replica_nodes() do
-    Node.list()
-    |> Enum.filter(fn node ->
-      node_str = Atom.to_string(node)
-      String.starts_with?(node_str, "pagos")
-    end)
+    service_prefix =
+      __MODULE__
+      |> Module.split()
+      |> Enum.at(1)
+      |> String.downcase()
+
+    nodes = Node.list()
+    Logger.debug("[#{service_prefix}] Buscando réplicas entre: #{inspect(nodes)}")
+
+    replicas =
+      nodes
+      |> Enum.filter(fn node ->
+        node_str = Atom.to_string(node)
+        String.starts_with?(node_str, service_prefix)
+      end)
+
+    Logger.info("[#{service_prefix}] Réplicas detectadas: #{inspect(replicas)}")
+    replicas
   end
 end
 

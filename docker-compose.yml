@@ -15,20 +15,55 @@ services:
     command: elixir --sname compras --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
-  ventas:
+  ventas1:
     image: elixir:1.15.7-alpine
-    container_name: ventas
+    container_name: ventas1
     volumes:
       - ./:/app
     working_dir: /app
     network_mode: "host"    
     environment:
+      ROLE: PRINCIPAL
       SERVER_TO_RUN: Elixir.Libremarket.Ventas.Server
       AMQP_TO_RUN: Elixir.Libremarket.Ventas.Consumer
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
-    command: elixir --sname ventas --cookie ${SECRET} -S mix run --no-halt --no-compile
+    command: elixir --sname ventas1 --cookie ${SECRET} -S mix run --no-halt --no-compile
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  ventas2:
+    image: elixir:1.15.7-alpine
+    container_name: ventas2
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"    
+    environment:
+      ROLE: REPLICA
+      SERVER_TO_RUN: Elixir.Libremarket.Ventas.Server
+      AMQP_TO_RUN: Elixir.Libremarket.Ventas.Consumer
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
+    command: elixir --sname ventas2 --cookie ${SECRET} -S mix run --no-halt --no-compile
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  ventas3:
+    image: elixir:1.15.7-alpine
+    container_name: ventas3
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"    
+    environment:
+      ROLE: REPLICA
+      SERVER_TO_RUN: Elixir.Libremarket.Ventas.Server
+      AMQP_TO_RUN: Elixir.Libremarket.Ventas.Consumer
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
+    command: elixir --sname ventas3 --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   pagos1:
@@ -133,20 +168,55 @@ services:
     command: elixir --sname infracciones3 --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
-  envios:
+  envios1:
     image: elixir:1.15.7-alpine
-    container_name: envios
+    container_name: envios1
     volumes:
       - ./:/app
     working_dir: /app
     network_mode: "host"
     environment:
+      ROLE: PRINCIPAL
       SERVER_TO_RUN: Elixir.Libremarket.Envios.Server
       AMQP_TO_RUN: Elixir.Libremarket.Envios.Consumer
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
-    command: elixir --sname envios --cookie ${SECRET} -S mix run --no-halt --no-compile
+    command: elixir --sname envios1 --cookie ${SECRET} -S mix run --no-halt --no-compile
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  envios2:
+    image: elixir:1.15.7-alpine
+    container_name: envios2
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      ROLE: REPLICA
+      SERVER_TO_RUN: Elixir.Libremarket.Envios.Server
+      AMQP_TO_RUN: Elixir.Libremarket.Envios.Consumer
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
+    command: elixir --sname envios2 --cookie ${SECRET} -S mix run --no-halt --no-compile
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  envios3:
+    image: elixir:1.15.7-alpine
+    container_name: envios3
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      ROLE: REPLICA
+      SERVER_TO_RUN: Elixir.Libremarket.Envios.Server
+      AMQP_TO_RUN: Elixir.Libremarket.Envios.Consumer
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
+    command: elixir --sname envios3 --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   api:
