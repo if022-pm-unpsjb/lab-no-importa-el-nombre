@@ -6,7 +6,8 @@ defmodule Libremarket.Compras do
       # Marcamos en el Server que estamos esperando reserva
       GenServer.cast({:global, Libremarket.Compras.Server}, {:actualizar_compra, id_compra, %{estado: :pendiente_reserva, producto_id: producto_id, forma_de_entrega: envio}})
 
-      :ok = Libremarket.AMQPHelper.publish_to_queue("ventas_queue", %{"id" => id_compra, "producto_id" => producto_id})
+      # Publicamos a ventas_queue para que el primario de Ventas procese la reserva
+      :ok = AMQPHelper.publish_to_queue("ventas_queue", %{"id" => id_compra, "producto_id" => producto_id})
 
       {:ok, Map.put(compra, :estado, :pendiente_reserva)}
     else
@@ -34,8 +35,15 @@ defmodule Libremarket.Compras.Consumer do
   def start_link(_), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
 
   def init(state) do
-    send(self(), :setup)
-    {:ok, %{chan: nil}}
+    role = System.get_env("ROLE") || "PRINCIPAL"
+
+    if role == "PRINCIPAL" do
+      send(self(), :setup)
+      {:ok, %{chan: nil, role: role}}
+    else
+      Logger.info("Compras.Consumer: modo REPLICA -> no me suscribo a AMQP.")
+      {:ok, %{chan: nil, role: role}}
+    end
   end
 
   def handle_info(:setup, state) do
@@ -72,15 +80,24 @@ defmodule Libremarket.Compras.Consumer do
                 estado: :en_revision
               }
 
-              GenServer.cast({:global, Libremarket.Compras.Server}, {:actualizar_compra, id, datos})
+              case Libremarket.Compras.Server.apply_and_replicate(id, datos) do
+                {:ok, compra_actualizada} ->
+                  # Obtener tipo_envio desde estado ahora replicado
+                  {:ok, compra} = Libremarket.Compras.Server.buscar(id)
+                  tipo_envio = compra[:forma_de_entrega]
 
-              {:ok, compra} = Libremarket.Compras.Server.buscar(id)
-              tipo_envio = compra[:forma_de_entrega]
+                  # Notificar a otros módulos (asincrónico)
+                  Libremarket.AMQPHelper.publish_to_queue("infracciones_queue", %{"id" => id})
+                  Libremarket.AMQPHelper.publish_to_queue("pagos_queue", %{"id" => id})
+                  Libremarket.AMQPHelper.publish_to_queue("envios_queue", %{"id" => id, "tipo_envio" => to_string(tipo_envio)})
 
-              # Ahora sí notificar a los otros módulos (asincrónico)
-              Libremarket.AMQPHelper.publish_to_queue("infracciones_queue", %{"id" => id})
-              Libremarket.AMQPHelper.publish_to_queue("pagos_queue", %{"id" => id})
-              Libremarket.AMQPHelper.publish_to_queue("envios_queue", %{"id" => id, "tipo_envio" => to_string(tipo_envio)})
+                {:error, reason, _compra} ->
+                  Logger.warn("Compras Consumer: replicación inicial falló #{inspect(reason)} — procederé igual a publicar.")
+                  Libremarket.AMQPHelper.publish_to_queue("infracciones_queue", %{"id" => id})
+                  Libremarket.AMQPHelper.publish_to_queue("pagos_queue", %{"id" => id})
+                  Libremarket.AMQPHelper.publish_to_queue("envios_queue", %{"id" => id,
+                  })
+              end
             else
               # Reserva fallida -> marcar la compra como cancelada/ sin stock
               motivo = Map.get(map, "reason", "sin_stock")
@@ -94,7 +111,12 @@ defmodule Libremarket.Compras.Consumer do
               [{key_str, value}] ->
                 Logger.info("Compras Consumer: recibido #{key_str}=#{inspect(value)} para compra #{id}")
                 normalized = normalize_key_value(key_str, value)
-                GenServer.cast({:global, Libremarket.Compras.Server}, {:actualizar_compra, id, normalized})
+                case Libremarket.Compras.Server.apply_and_replicate(id, normalized) do
+                  {:ok, _compra} ->
+                    :ok
+                  {:error, reason, _compra} ->
+                    Logger.warn("Compras Consumer: replicación parcial falló #{inspect(reason)}")
+                end
               _ ->
                 Logger.warn("Compras Consumer: mensaje con atributos inesperados #{inspect(map)}")
             end
@@ -145,7 +167,11 @@ defmodule Libremarket.Compras.Server do
 
   @global_name {:global, __MODULE__}
 
-  def start_link(opts \\ %{}), do: GenServer.start_link(__MODULE__, opts, name: @global_name)
+  def start_link(opts \\ %{}) do
+    role = System.get_env("ROLE") || "PRINCIPAL"
+    name = if role == "PRINCIPAL", do: @global_name, else: __MODULE__
+    GenServer.start_link(__MODULE__, %{role: role}, name: name)
+  end
 
   def comprar(pid \\ __MODULE__, id_compra), do: GenServer.call(@global_name, {:comprar, id_compra})
 
@@ -163,65 +189,80 @@ defmodule Libremarket.Compras.Server do
     GenServer.cast(@global_name, {:seleccionar_forma_de_entrega, id_compra, entrega})
   end
 
-  #Esta es la funcion que se debe llamar para enviar un mensaje.
-  #Esta hardcodeada para este caso en particular. Pero deberia ser algo "generico".
-  def send_message(pid \\ __MODULE__, message) do
-    {:ok, connection} =
-      Connection.open("amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz",
-        ssl_options: [verify: :verify_none]
-      )
+  def apply_and_replicate(id, nuevos_campos) do
+    try do
+      GenServer.call(@global_name, {:apply_and_replicate, id, nuevos_campos}, 10_000)
+    catch
+      :exit, reason ->
+        Logger.error("Compras.Server.apply_and_replicate: fallo call al servidor global #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
 
-    {:ok, channel} = Channel.open(connection)
+  def replica_apply(id, nuevos_campos) do
+    GenServer.call(__MODULE__, {:replica_update, id, nuevos_campos}, 5_000)
+  end
 
-    queue_name = "infracciones_queue"
-    Queue.declare(channel, queue_name, durable: false)
+  def fetch_local(id_compra) do
+    name =
+      case System.get_env("ROLE") do
+        "PRINCIPAL" -> @global_name
+        _ -> __MODULE__
+      end
 
-    Basic.publish(channel, "", queue_name, to_string(message))
-    IO.puts("Mensaje enviado a #{queue_name}: #{inspect(message)}")
+    # Hacemos el call localmente al GenServer con la misma API que ya tienes
+    try do
+      GenServer.call(name, {:buscar, id_compra})
+    catch
+      :exit, reason -> {:error, {:exit, reason}}
+      :error, reason -> {:error, reason}
+    end
+  end
 
-    # Pequeña espera para dar tiempo al broker a procesar (o preferir confirms)
-    Process.sleep(500)
+  def inspeccionar_compra_en_nodos(id, timeout \\ 5_000) do
+    service_prefix = "compras"
 
-    Channel.close(channel)
-    Connection.close(connection)
+    # incluímos el nodo local también en caso de que no figure en Node.list()
+    all_nodes = Enum.uniq([node() | Node.list()])
 
-    :ok
+    nodes =
+      all_nodes
+      |> Enum.filter(fn n ->
+        n_str = Atom.to_string(n)
+        String.starts_with?(n_str, service_prefix)
+      end)
+
+    nodes
+    |> Enum.map(fn n ->
+      res =
+        case :rpc.call(n, Libremarket.Compras.Server, :fetch_local, [id], timeout) do
+          {:ok, _} = ok -> ok
+          {:error, _} = err -> err
+          {:badrpc, reason} -> {:error, {:badrpc, reason}}
+          other -> {:error, {:unexpected, other}}
+        end
+
+      {n, res}
+    end)
   end
 
   @impl true
   def handle_cast({:actualizar_compra, id, nuevos_campos}, state) do
-    compra_actual = Map.get(state, id, %{})
-    compra_actualizada = Map.merge(compra_actual, nuevos_campos)
-
-    compra_final =
-      cond do
-        # Si no hay stock, la compra se cancela definitivamente
-        compra_actualizada[:estado] == :sin_stock ->
-          Map.put(compra_actualizada, :estado, :sin_stock)
-
-        # Si está en proceso de reserva, no publicamos todavía nada
-        compra_actualizada[:estado] == :pendiente_reserva ->
-          compra_actualizada
-
-        # Si falló infracción o pago
-        compra_actualizada[:infraccion] == true ->
-          Map.put(compra_actualizada, :estado, :error_infracciones)
-
-        compra_actualizada[:pago] == false ->
-          Map.put(compra_actualizada, :estado, :error_pago)
-
-        # Si ya pasó infracciones y pago correctamente
-        compra_actualizada[:estado] == :en_revision and
-            compra_actualizada[:pago] == true and
-            compra_actualizada[:infraccion] == false ->
-          Map.put(compra_actualizada, :estado, :finalizado)
-
-        true ->
-          compra_actualizada
-      end
-
+    {compra_final, nuevo_state} = apply_update(state, id, nuevos_campos)
     Logger.info("Compras Server: actualizando compra #{inspect(id)} con #{inspect(compra_final)}")
-    {:noreply, Map.put(state, id, compra_final)}
+
+    # Si soy primario, replico asincrónicamente (no bloqueo el handle_cast)
+    if System.get_env("ROLE") == "PRINCIPAL" do
+      Task.start(fn ->
+        # replicar sólo los cambios (mantener la semántica actual)
+        replica_nodes = get_replica_nodes()
+        Enum.each(replica_nodes, fn node ->
+          :rpc.call(node, Libremarket.Compras.Server, :replica_apply, [id, nuevos_campos], 5_000)
+        end)
+      end)
+    end
+
+    {:noreply, nuevo_state}
   end
 
   def terminate(reason, state) do
@@ -230,7 +271,9 @@ defmodule Libremarket.Compras.Server do
   end
 
   @impl true
-  def init(_opts), do: {:ok, %{}}
+  def init(%{role: role}) do
+    {:ok, %{}}
+  end
 
   def handle_call({:comprar, id_compra}, _from, state) do
     case Map.fetch(state, id_compra) do
@@ -251,12 +294,27 @@ defmodule Libremarket.Compras.Server do
 
   @impl true
   def handle_cast({:seleccionar_medio_de_pago, id_compra, medio}, state) do
-    {:noreply, update_in(state, [id_compra], &Map.put(&1, :medio_de_pago, medio))}
+    {compra_final, nuevo_state} = apply_update(state, id_compra, %{medio_de_pago: medio})
+    Logger.info("Compras Server: seleccionar_medio_de_pago id=#{inspect(id_compra)} medio=#{inspect(medio)} -> #{inspect(compra_final)}")
+
+    # replico si este nodo es PRIMARIO
+    if System.get_env("ROLE") == "PRINCIPAL" do
+      Task.start(fn -> replicate_change_to_replicas(id_compra, %{medio_de_pago: medio}) end)
+    end
+
+    {:noreply, nuevo_state}
   end
 
   @impl true
   def handle_cast({:seleccionar_forma_de_entrega, id_compra, entrega}, state) do
-    {:noreply, update_in(state, [id_compra], &Map.put(&1, :forma_de_entrega, entrega))}
+    {compra_final, nuevo_state} = apply_update(state, id_compra, %{forma_de_entrega: entrega})
+    Logger.info("Compras Server: seleccionar_forma_de_entrega id=#{inspect(id_compra)} entrega=#{inspect(entrega)} -> #{inspect(compra_final)}")
+
+    if System.get_env("ROLE") == "PRINCIPAL" do
+      Task.start(fn -> replicate_change_to_replicas(id_compra, %{forma_de_entrega: entrega}) end)
+    end
+
+    {:noreply, nuevo_state}
   end
 
   @impl true
@@ -269,5 +327,105 @@ defmodule Libremarket.Compras.Server do
   defp marcar_finalizada(compra) do
     compra
     |> Map.put("estado", :finalizado)
+  end
+
+  defp replicate_change_to_replicas(id, cambios) do
+    replica_nodes = get_replica_nodes()
+
+    Enum.each(replica_nodes, fn node ->
+      try do
+        :rpc.call(node, Libremarket.Compras.Server, :replica_apply, [id, cambios], 5_000)
+      catch
+        :exit, reason ->
+          Logger.warn("Replica async: RPC exit a #{inspect(node)} -> #{inspect(reason)}")
+        :error, reason ->
+          Logger.warn("Replica async: RPC error a #{inspect(node)} -> #{inspect(reason)}")
+      end
+    end)
+  end
+
+  @impl true
+  def handle_call({:apply_and_replicate, id, nuevos_campos}, _from, state) do
+    # aplicamos la actualización localmente (misma semántica que handle_cast)
+    {compra_final, state2} = apply_update(state, id, nuevos_campos)
+    Logger.info("Compras Server (PRINCIPAL): apply_and_replicate id=#{inspect(id)} cambios=#{inspect(nuevos_campos)} -> #{inspect(compra_final)}")
+
+    # replicar sólo si existe alguna réplica
+    replica_nodes = get_replica_nodes()
+    Logger.info("Compras.Server (primario) replicando a nodos=#{inspect(replica_nodes)}")
+
+    results =
+      replica_nodes
+      |> Enum.map(fn node ->
+        try do
+          :rpc.call(node, Libremarket.Compras.Server, :replica_apply, [id, nuevos_campos], 5_000)
+        catch
+          :exit, reason ->
+            Logger.warn("RPC exit al nodo #{inspect(node)} -> #{inspect(reason)}")
+            {:badrpc, reason}
+          :error, reason ->
+            Logger.warn("RPC error al nodo #{inspect(node)} -> #{inspect(reason)}")
+            {:badrpc, reason}
+        end
+      end)
+
+    if replica_nodes == [] or Enum.all?(results, &(&1 == :ok)) do
+      Logger.info("Compras.Server: replicación OK (resultados=#{inspect(results)})")
+      {:reply, {:ok, compra_final}, state2}
+    else
+      Logger.warn("Compras.Server: replicación incompleta, resultados=#{inspect(results)}")
+      {:reply, {:error, :replication_failed, results, compra_final}, state2}
+    end
+  end
+
+  @impl true
+  def handle_call({:replica_update, id, nuevos_campos}, _from, state) do
+    {compra_final, nuevo_state} = apply_update(state, id, nuevos_campos)
+    Logger.info("Compras REPLICA #{inspect(node())}: replica_update id=#{inspect(id)} cambios=#{inspect(nuevos_campos)} -> #{inspect(compra_final)}")
+    {:reply, :ok, nuevo_state}
+  end
+
+  defp get_replica_nodes() do
+    service_prefix =
+      __MODULE__
+      |> Module.split()
+      |> Enum.at(1)
+      |> String.downcase()
+
+    Node.list()
+    |> Enum.filter(fn node ->
+      node_str = Atom.to_string(node)
+      String.starts_with?(node_str, service_prefix)
+    end)
+  end
+
+  defp apply_update(state, id, nuevos_campos) do
+    compra_actual = Map.get(state, id, %{})
+    compra_actualizada = Map.merge(compra_actual, nuevos_campos)
+    compra_actualizada = Map.put_new(compra_actualizada, :id, id)   # <- aseguro id
+
+    compra_final =
+      cond do
+        compra_actualizada[:estado] == :sin_stock ->
+          Map.put(compra_actualizada, :estado, :sin_stock)
+
+        compra_actualizada[:estado] == :pendiente_reserva ->
+          compra_actualizada
+
+        compra_actualizada[:infraccion] == true ->
+          Map.put(compra_actualizada, :estado, :error_infracciones)
+
+        compra_actualizada[:pago] == false ->
+          Map.put(compra_actualizada, :estado, :error_pago)
+
+        compra_actualizada[:estado] == :en_revision and Map.get(compra_actualizada, :pago) == true and Map.get(compra_actualizada, :infraccion) == false ->
+          Map.put(compra_actualizada, :estado, :finalizado)
+
+        true ->
+          compra_actualizada
+      end
+
+    nuevo_state = Map.put(state, id, compra_final)
+    {compra_final, nuevo_state}
   end
 end

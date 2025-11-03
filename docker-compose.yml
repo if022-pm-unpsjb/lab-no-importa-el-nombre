@@ -1,18 +1,53 @@
 services:
-  compras:
+  compras1:
     image: elixir:1.15.7-alpine
-    container_name: compras
+    container_name: compras1
     volumes:
       - ./:/app
     working_dir: /app
     network_mode: "host"
     environment:
+      ROLE: PRINCIPAL
       SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
       AMQP_TO_RUN: Elixir.Libremarket.Compras.Consumer
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
-    command: elixir --sname compras --cookie ${SECRET} -S mix run --no-halt --no-compile
+    command: elixir --sname compras1 --cookie ${SECRET} -S mix run --no-halt --no-compile
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  compras2:
+    image: elixir:1.15.7-alpine
+    container_name: compras2
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      ROLE: REPLICA
+      SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
+      AMQP_TO_RUN: Elixir.Libremarket.Compras.Consumer
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
+    command: elixir --sname compras2 --cookie ${SECRET} -S mix run --no-halt --no-compile
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  compras3:
+    image: elixir:1.15.7-alpine
+    container_name: compras3
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      ROLE: REPLICA
+      SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
+      AMQP_TO_RUN: Elixir.Libremarket.Compras.Consumer
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      CLOUDAMQP_URL: amqp://ypznoogz:nqrvK3KQFu1BkqocK3WTTvQtQfqdWyga@shark.rmq.cloudamqp.com/ypznoogz
+    command: elixir --sname compras3 --cookie ${SECRET} -S mix run --no-halt --no-compile
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   ventas1:
