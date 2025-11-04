@@ -48,10 +48,14 @@ defmodule Libremarket.Supervisor do
           [{String.to_existing_atom(amqp_str), %{}}]
       end
 
-    children = [
-      {Cluster.Supervisor, [topologies, [name: Libremarket.ClusterSupervisor]]},
-      Libremarket.AMQPConn
-    ] ++ server_to_run ++ amqp_to_run
+      children = [
+        {Cluster.Supervisor, [topologies, [name: Libremarket.ClusterSupervisor]]},
+        Libremarket.AMQPConn
+      ] ++ server_to_run ++ amqp_to_run ++
+        [
+          # Leader election para Infracciones
+          {Libremarket.LeaderElection, service: Libremarket.Infracciones.Server, consumer: Libremarket.Infracciones.Consumer, check_ms: 1_000}
+        ]
 
     Supervisor.init(children, strategy: :one_for_one)
   end

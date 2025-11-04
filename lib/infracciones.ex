@@ -16,18 +16,79 @@ defmodule Libremarket.Infracciones.Consumer do
   @in_queue "infracciones_queue"
   @out_queue "compras_queue"  # resultados van aquí
 
-  def start_link(_opts), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
+  def start_link(_opts), do: GenServer.start_link(__MODULE__, %{chan: nil, leader?: false}, name: __MODULE__)
 
   def init(state) do
-    # Solo el PRIMARIO debe suscribirse a AMQP
-    role = System.get_env("ROLE") || "PRINCIPAL"
-    if role == "PRINCIPAL" do
-      send(self(), :setup)
-      {:ok, Map.put(state, :role, role)}
-    else
-      Logger.info("Infracciones.Consumer: modo REPLICA -> no me suscribo a AMQP.")
-      {:ok, Map.put(state, :role, role)}
+    # no dependemos de ROLE; LeaderElection enviará {:leader, true} cuando toque
+    Logger.info("Infracciones.Consumer iniciado (esperando liderazgo)")
+    {:ok, state}
+  end
+
+  # Cuando LeaderElection comunica que somos leader, intentamos conectarnos a AMQP
+  def handle_info({:leader, true}, state) do
+    Logger.info("Infracciones.Consumer: become LEADER -> setup AMQP (intentando enable en AMQPConn)")
+
+    # Pedimos a AMQPConn que se habilite (si estaba disabled)
+    :ok = Libremarket.AMQPConn.enable()
+
+    case Libremarket.AMQPConn.get_channel() do
+      {:ok, chan} ->
+        Queue.declare(chan, @in_queue, durable: false)
+        {:ok, _ct} = Basic.consume(chan, @in_queue, nil, no_ack: false)
+        Logger.info("Infracciones listening on #{@in_queue}")
+
+        # cancelar retry anterior si existía
+        if Map.has_key?(state, :leader_retry_ref) do
+          Process.cancel_timer(state.leader_retry_ref)
+        end
+
+        new_state =
+          state
+          |> Map.put(:chan, chan)
+          |> Map.put(:leader?, true)
+          |> Map.delete(:leader_retry_ref)
+
+        {:noreply, new_state}
+
+      {:error, _reason} ->
+        Logger.error("Infracciones Consumer: sin conexion AMQP al convertirse en leader, reintentando en 1s")
+        # reintentamos en 1s pero guardamos ref para poder cancelarlo si perdemos liderazgo
+        ref = Process.send_after(self(), {:leader, true}, 1_000)
+        {:noreply, Map.put(state, :leader_retry_ref, ref)}
     end
+  end
+
+  # Cuando dejamos de ser leader, cerramos canal si existe y marcamos estado
+  def handle_info({:leader, false}, state) do
+    Logger.info("Infracciones.Consumer: dejar de ser LEADER -> cerrar canal si existe y cancelar retries")
+    # cancelar retry si existe
+    if ref = Map.get(state, :leader_retry_ref), do: Process.cancel_timer(ref)
+
+    # cerrar canal si existe
+    if chan = Map.get(state, :chan) do
+      try do
+        AMQP.Channel.close(chan)
+      rescue
+        _ -> :ok
+      end
+    end
+
+    # advertir AMQPConn que se puede deshabilitar si querés (opcional)
+    :ok = Libremarket.AMQPConn.disable()
+
+    new_state =
+      state
+      |> Map.put(:chan, nil)
+      |> Map.put(:leader?, false)
+      |> Map.delete(:leader_retry_ref)
+
+    {:noreply, new_state}
+  end
+
+  # Conserva el resto intacto: procesado de mensajes
+  def handle_info({:basic_deliver, payload, meta}, %{chan: chan} = state) do
+    spawn(fn -> process_message(chan, payload, meta) end)
+    {:noreply, state}
   end
 
   def handle_info(:setup, state) do
@@ -44,9 +105,16 @@ defmodule Libremarket.Infracciones.Consumer do
     end
   end
 
-  def handle_info({:basic_deliver, payload, meta}, %{chan: chan} = state) do
+  def handle_info({:basic_deliver, payload, meta}, state) do
+    chan = Map.get(state, :chan)
     spawn(fn -> process_message(chan, payload, meta) end)
     {:noreply, state}
+  end
+
+  defp process_message(nil, _payload, %{delivery_tag: tag}) do
+    # Si por alguna razón no tenemos canal, no podemos ack; solo loggeamos (evitar crash)
+    Logger.error("Infracciones.Consumer: recibí mensaje pero no tengo canal AMQP para ack (tag=#{inspect(tag)})")
+    :ok
   end
 
   defp process_message(chan, payload, %{delivery_tag: tag}) do
@@ -110,9 +178,8 @@ defmodule Libremarket.Infracciones.Server do
   Crea un nuevo servidor de Infracciones
   """
   def start_link(opts \\ %{}) do
-    role = System.get_env("ROLE") || "PRINCIPAL"
-    name = if role == "PRINCIPAL", do: @global_name, else: __MODULE__
-    GenServer.start_link(__MODULE__, %{role: role}, name: name)
+    # arrancamos siempre con registro local; el LeaderElection hará :global.register_name/2 cuando toque
+    GenServer.start_link(__MODULE__, %{role: System.get_env("ROLE") || "REPLICA"}, name: __MODULE__)
   end
 
   def detectar_infraccion(pid \\ __MODULE__, id_compra) do

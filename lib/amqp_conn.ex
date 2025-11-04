@@ -9,18 +9,13 @@ defmodule Libremarket.AMQPConn do
 
   def init(_) do
     role = System.get_env("ROLE") || "PRINCIPAL"
-
-    if role == "REPLICA" do
-      Logger.info("AMQPConn: ROLE=REPLICA -> no inicializo conexión AMQP")
-      # estado consistente para réplicas (no confundir con un átomo)
-      {:ok, %{conn: nil, disabled: true}}
-    else
-      url = System.get_env("CLOUDAMQP_URL")
-      state = %{url: url, conn: nil, disabled: false}
-      # intentamos conectar en background
+    url = System.get_env("CLOUDAMQP_URL")
+    state = %{url: url, conn: nil, disabled: (role == "REPLICA")}
+    # solo iniciar conexión si no está disabled
+    if not state.disabled do
       send(self(), :connect)
-      {:ok, state}
     end
+    {:ok, state}
   end
 
   def handle_info(:connect, %{url: nil} = state) do
@@ -74,5 +69,38 @@ defmodule Libremarket.AMQPConn do
   # seguridad: si llega un get inesperado y state no tiene la forma prevista
   def handle_call(:get_channel, _from, state) do
     {:reply, {:error, :no_amqp}, state}
+  end
+
+  def enable(), do: GenServer.call(__MODULE__, :enable)
+
+  # enable -> permitimos conectar (ejecuta :connect)
+  def handle_call(:enable, _from, %{disabled: false} = state) do
+    {:reply, :ok, state}
+  end
+
+  # caso: estaba disabled -> permitir conectar y lanzar :connect
+  def handle_call(:enable, _from, %{disabled: true} = state) do
+    new_state = %{state | disabled: false, url: state.url || System.get_env("CLOUDAMQP_URL")}
+    send(self(), :connect)
+    {:reply, :ok, new_state}
+  end
+
+  def disable(), do: GenServer.call(__MODULE__, :disable)
+
+  # caso: already disabled -> ok (no-op)
+  def handle_call(:disable, _from, %{disabled: true} = state) do
+    {:reply, :ok, state}
+  end
+
+  # disable: cerrar conexión y marcar disabled
+  def handle_call(:disable, _from, state) do
+    if state.conn do
+      try do
+        Connection.close(state.conn)
+      rescue
+        _ -> :ok
+      end
+    end
+    {:reply, :ok, %{state | conn: nil, disabled: true}}
   end
 end
