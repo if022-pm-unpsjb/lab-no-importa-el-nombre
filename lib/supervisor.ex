@@ -53,8 +53,17 @@ defmodule Libremarket.Supervisor do
         Libremarket.AMQPConn
       ] ++ server_to_run ++ amqp_to_run ++
         [
-          # Leader election para Infracciones
-          {Libremarket.LeaderElection, service: Libremarket.Infracciones.Server, consumer: Libremarket.Infracciones.Consumer, check_ms: 1_000}
+          # Leader election para Infracciones (id único)
+          Supervisor.child_spec(
+            {Libremarket.LeaderElection, service: Libremarket.Infracciones.Server, consumer: Libremarket.Infracciones.Consumer, check_ms: 1_000},
+            id: :leader_election_infracciones
+          ),
+
+          # Leader election para Pagos (id único distinto)
+          Supervisor.child_spec(
+            {Libremarket.LeaderElection, service: Libremarket.Pagos.Server, consumer: Libremarket.Pagos.Consumer, check_ms: 1_000},
+            id: :leader_election_pagos
+          )
         ]
 
     Supervisor.init(children, strategy: :one_for_one)

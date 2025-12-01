@@ -57,12 +57,19 @@ defmodule Libremarket.LeaderElection do
 
         cond do
           leader == node() and not was_leader ->
-            # Intentar registrarse globalmente con protección contra races
             pid = Process.whereis(service)
+
+            # esperar por réplicas antes de registrarse (opcional)
+            service_prefix =
+              service
+              |> Module.split()
+              |> Enum.at(1)
+              |> String.downcase()
+
+            wait_for_replicas(service_prefix, 2_000)
 
             case :global.whereis_name(service) do
               ^pid when is_pid(pid) ->
-                # ya registrado a nuestro pid
                 Logger.info("[leader_election #{inspect(service)}] ya registrado globalmente a este pid #{inspect(pid)}")
                 notify_consumer(consumer, true)
                 Process.send_after(self(), :check, ms)
@@ -78,7 +85,6 @@ defmodule Libremarket.LeaderElection do
                       {:noreply, %{state | is_leader: true}}
 
                     :no ->
-                      # Otro nodo ganó la carrera: respetarlo y no marcar como leader
                       owner = :global.whereis_name(service)
                       Logger.warn("[leader_election] register_name returned :no, owner=#{inspect(owner)} — no seré líder.")
                       Process.send_after(self(), :check, ms + 200)
@@ -96,7 +102,6 @@ defmodule Libremarket.LeaderElection do
                 end
 
               owner_pid when is_pid(owner_pid) ->
-                # Ya registrado en otro pid -> no podemos ser leader
                 Logger.warn("[leader_election] nombre global ya registrado en #{inspect(owner_pid)}; no asumir liderazgo.")
                 notify_consumer(consumer, false)
                 Process.send_after(self(), :check, ms)
@@ -104,7 +109,7 @@ defmodule Libremarket.LeaderElection do
             end
 
           leader != node() and was_leader ->
-            # Perdimos liderazgo — sólo desempregamos global si nosotros somos los dueños
+            # Perdimos liderazgo — desempregistramos si somos dueños globales
             pid = Process.whereis(service)
             owner = :global.whereis_name(service)
             if owner == pid and is_pid(pid) do
@@ -121,7 +126,7 @@ defmodule Libremarket.LeaderElection do
             {:noreply, %{state | is_leader: false}}
 
           true ->
-            # sin cambio
+            # sin cambios
             Process.send_after(self(), :check, ms)
             {:noreply, state}
         end
@@ -143,6 +148,28 @@ defmodule Libremarket.LeaderElection do
         Logger.warn("[leader_election] no encontre consumer #{inspect(consumer_mod)} para enviar :leader false")
       pid ->
         send(pid, {:leader, false})
+    end
+  end
+
+  defp wait_for_replicas(service_prefix, max_wait_ms) do
+    deadline = System.monotonic_time(:millisecond) + max_wait_ms
+    do_wait_for_replicas(service_prefix, deadline)
+  end
+
+  defp do_wait_for_replicas(service_prefix, deadline) do
+    nodes = Enum.uniq([node() | Node.list()])
+    found =
+      nodes
+      |> Enum.any?(fn n ->
+        n_str = Atom.to_string(n)
+        String.starts_with?(n_str, service_prefix) and n != node()
+      end)
+
+    if found or System.monotonic_time(:millisecond) >= deadline do
+      :ok
+    else
+      Process.sleep(150)
+      do_wait_for_replicas(service_prefix, deadline)
     end
   end
 end
