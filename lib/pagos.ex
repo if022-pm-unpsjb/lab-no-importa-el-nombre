@@ -170,7 +170,6 @@ defmodule Libremarket.Pagos.Server do
     end
   end
 
-
   @impl true
   def handle_call(:get_state, _from, state) do
     # devolvemos una copia segura
@@ -448,36 +447,6 @@ defmodule Libremarket.Pagos.Consumer do
     {:ok, state}
   end
 
-  defp process_message(nil, _payload, %{delivery_tag: tag}) do
-    # Si por alguna razón no tenemos canal, no podemos ack; solo loggeamos (evitar crash)
-    Logger.error("Pagos.Consumer: recibí mensaje pero no tengo canal AMQP para ack (tag=#{inspect(tag)})")
-    :ok
-  end
-
-  defp process_message(chan, payload, %{delivery_tag: tag}) do
-    case Jason.decode(payload) do
-      {:ok, %{"id" => id}} ->
-
-        pago_ok = Libremarket.Pagos.autorizar_pago()
-        Logger.info("Pagos -> id=#{id} autorizado? #{inspect(pago_ok)}")
-
-        case Libremarket.Pagos.Server.apply_and_replicate(id, pago_ok) do
-          :ok ->
-            Libremarket.AMQPHelper.publish_to_queue(@out_queue, %{"id" => id, "pago" => pago_ok})
-            AMQP.Basic.ack(chan, tag)
-
-          {:error, reason} ->
-            Logger.warn("Pagos: replicación falló #{inspect(reason)} — publicando de todas formas.")
-            Libremarket.AMQPHelper.publish_to_queue(@out_queue, %{"id" => id, "pago" => pago_ok})
-            AMQP.Basic.ack(chan, tag)
-        end
-
-      {:error, _} ->
-        Logger.error("Pagos: payload mal formado #{inspect(payload)}")
-        AMQP.Basic.reject(chan, tag, requeue: false)
-    end
-  end
-
   def handle_info(:setup, state) do
     case Libremarket.AMQPConn.get_channel() do
       {:ok, chan} ->
@@ -576,5 +545,35 @@ defmodule Libremarket.Pagos.Consumer do
       |> Map.delete(:leader_retry_ref)
 
     {:noreply, new_state}
+  end
+
+  defp process_message(chan, payload, %{delivery_tag: tag}) do
+    case Jason.decode(payload) do
+      {:ok, %{"id" => id}} ->
+
+        pago_ok = Libremarket.Pagos.autorizar_pago()
+        Logger.info("Pagos -> id=#{id} autorizado? #{inspect(pago_ok)}")
+
+        case Libremarket.Pagos.Server.apply_and_replicate(id, pago_ok) do
+          :ok ->
+            Libremarket.AMQPHelper.publish_to_queue(@out_queue, %{"id" => id, "pago" => pago_ok})
+            AMQP.Basic.ack(chan, tag)
+
+          {:error, reason} ->
+            Logger.warn("Pagos: replicación falló #{inspect(reason)} — publicando de todas formas.")
+            Libremarket.AMQPHelper.publish_to_queue(@out_queue, %{"id" => id, "pago" => pago_ok})
+            AMQP.Basic.ack(chan, tag)
+        end
+
+      {:error, _} ->
+        Logger.error("Pagos: payload mal formado #{inspect(payload)}")
+        AMQP.Basic.reject(chan, tag, requeue: false)
+    end
+  end
+
+  defp process_message(nil, _payload, %{delivery_tag: tag}) do
+    # Si por alguna razón no tenemos canal, no podemos ack; solo loggeamos (evitar crash)
+    Logger.error("Pagos.Consumer: recibí mensaje pero no tengo canal AMQP para ack (tag=#{inspect(tag)})")
+    :ok
   end
 end
