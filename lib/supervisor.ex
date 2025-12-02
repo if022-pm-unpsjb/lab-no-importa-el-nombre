@@ -75,6 +75,12 @@ defmodule Libremarket.Supervisor do
           Supervisor.child_spec(
             {Libremarket.LeaderElection, service: Libremarket.Ventas.Server, consumer: Libremarket.Ventas.Consumer, check_ms: 1_000},
             id: :leader_election_ventas
+          ),
+
+          # Leader election para Ventas (id único distinto)
+          Supervisor.child_spec(
+            {Libremarket.LeaderElection, service: Libremarket.Compras.Server, consumer: Libremarket.Compras.Consumer, check_ms: 1_000},
+            id: :leader_election_compras
           )
         ]
 
