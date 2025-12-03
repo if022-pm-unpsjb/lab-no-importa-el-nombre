@@ -416,7 +416,9 @@ defmodule Libremarket.Compras.Server do
   @impl true
   def handle_call({:apply_and_replicate, id, nuevos_campos}, _from, state) do
     new_seq = (state.seq || 0) + 1
-    {compra_final, state2} = apply_update(state, id, nuevos_campos, seq: new_seq)
+    {compra_final, state2} = apply_update(state, id, nuevos_campos)
+    # avanzamos el seq global del leader
+    state2 = %{state2 | seq: new_seq}
 
     Logger.info("Compras.Server (PRINCIPAL): apply_and_replicate id=#{inspect(id)} cambios=#{inspect(nuevos_campos)} -> #{inspect(compra_final)}")
 
@@ -453,16 +455,16 @@ defmodule Libremarket.Compras.Server do
 
     cond do
       seq > local_seq ->
-        # actualización más nueva -> aplicar y avanzar seq
-        {compra_final, nuevo_state} = apply_update(state, id, nuevos_campos, seq: seq)
+        # aplicar cambios a la entry (sin poner seq/ts en la entry)
+        {compra_final, nuevo_state} = apply_update(state, id, nuevos_campos)
+        # avanzar seq local al seq de la réplica
         nuevo_state = %{nuevo_state | seq: seq}
         Logger.info("Compras REPLICA #{inspect(node())}: replica_update id=#{inspect(id)} seq=#{seq} cambios=#{inspect(nuevos_campos)} -> #{inspect(compra_final)}")
         {:reply, :ok, nuevo_state}
 
       seq == local_seq ->
-        # misma versión: aplicar (idempotente) pero no subir seq
-        {compra_final, nuevo_state} = apply_update(state, id, nuevos_campos, seq: seq)
-        # mantener state.seq igual
+        # aplicar idempotente (no subimos seq)
+        {compra_final, nuevo_state} = apply_update(state, id, nuevos_campos)
         Logger.debug("Compras REPLICA #{inspect(node())}: replica_update id=#{inspect(id)} seq=#{seq} aplicado idempotente")
         {:reply, :ok, nuevo_state}
 
@@ -681,21 +683,14 @@ defmodule Libremarket.Compras.Server do
     end
   end
 
-  defp apply_update(state, id, nuevos_campos, opts \\ []) do
-    # state es el estado del GenServer ({storage, seq} wrapper)
+  defp apply_update(state, id, nuevos_campos, _opts \\ []) do
     storage = Map.get(state, :storage, %{})
     compra_actual = Map.get(storage, id, %{})
     compra_actualizada = Map.merge(compra_actual, nuevos_campos)
     compra_actualizada = Map.put_new(compra_actualizada, :id, id)
 
-    # primero aplicamos seq/ts como antes (si nos pasaron seq)
-    compra_con_meta =
-      compra_actualizada
-      |> maybe_put_seq(opts[:seq])
-      |> Map.put_new(:ts, :os.system_time(:millisecond))
-
-    # AHORA: comprobar si con los campos actuales hay que finalizar o marcar error
-    compra_final = maybe_finalize(compra_con_meta)
+    # NO agregar :seq ni :ts dentro de la entry
+    compra_final = maybe_finalize(compra_actualizada)
 
     nuevo_storage = Map.put(storage, id, compra_final)
     nuevo_state = %{state | storage: nuevo_storage}
@@ -740,8 +735,6 @@ defmodule Libremarket.Compras.Server do
   end
 
   defp maybe_finalize(other), do: other
-  defp maybe_put_seq(map, nil), do: map
-  defp maybe_put_seq(map, seq) when is_integer(seq), do: Map.put(map, :seq, seq)
 
   defp marcar_finalizada(compra) do
     compra
@@ -814,5 +807,84 @@ defmodule Libremarket.Compras.Server do
     end
 
     {:noreply, state}
+  end
+
+  def debug_cluster_state(timeout \\ 3_000) do
+    server_mod = __MODULE__
+
+    # quien es el owner global (si existe)
+    leader_pid = :global.whereis_name(server_mod)
+    leader_node = if is_pid(leader_pid), do: node(leader_pid), else: :undefined
+
+    # detectar nodos candidatos según el prefijo del módulo (igual que get_replica_nodes)
+    replica_nodes = get_replica_nodes()
+
+    # estado local (intenta Process.whereis primero, si no, intenta :global.whereis_name)
+    local_state =
+      case Process.whereis(server_mod) do
+        pid when is_pid(pid) ->
+          safe_call_local(server_mod, timeout)
+
+        nil ->
+          case :global.whereis_name(server_mod) do
+            pid when is_pid(pid) ->
+              # si el owner está en este nodo, pid estará aquí; si owner está en otro nodo,
+              # este devolverá pid solo si owner vive localmente.
+              if node(pid) == node() do
+                safe_call_local(server_mod, timeout)
+              else
+                {:error, :not_started_locally}
+              end
+
+            :undefined ->
+              {:error, :not_started}
+          end
+      end
+
+    # pedir estado a réplicas (RPCs)
+    peers =
+      replica_nodes
+      |> Enum.map(fn peer_node ->
+        {peer_node, fetch_remote_state(peer_node, server_mod, timeout)}
+      end)
+      |> Enum.into(%{})
+
+    %{
+      local: {node(), local_state},
+      leader_node: leader_node,
+      peers: peers,
+      timestamp: System.system_time(:millisecond)
+    }
+  end
+
+  defp safe_call_local(server_mod, timeout) do
+    try do
+      # si el módulo expone :get_state debería devolver {storage, seq} o similar
+      case GenServer.call(server_mod, :get_state, timeout) do
+        {storage, seq} -> {:ok, %{storage: storage, seq: seq}}
+        other -> {:ok, other}
+      end
+    catch
+      :exit, reason -> {:error, {:call_failed, reason}}
+      :error, reason -> {:error, {:call_failed, reason}}
+    end
+  end
+
+  defp fetch_remote_state(peer_node, server_mod, timeout) do
+    try do
+      case :rpc.call(peer_node, server_mod, :get_state, [], timeout) do
+        {storage, seq} when is_integer(seq) and (is_map(storage) or is_list(storage)) ->
+          {:ok, %{storage: storage, seq: seq}}
+
+        other when other == :badrpc ->
+          {:error, :badrpc}
+
+        other ->
+          {:error, {:invalid_reply, other}}
+      end
+    catch
+      :exit, reason -> {:error, {:badrpc, reason}}
+      :error, reason -> {:error, {:badrpc, reason}}
+    end
   end
 end

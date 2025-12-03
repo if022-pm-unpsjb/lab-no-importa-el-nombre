@@ -83,9 +83,7 @@ defmodule Libremarket.Envios.Server do
     envio = %{
       id_compra: id_compra,
       tipo_envio: tipo_envio,
-      costo_envio: costo_envio,
-      seq: new_seq,
-      ts: :os.system_time(:millisecond)
+      costo_envio: costo_envio
     }
 
     new_storage = Map.put(state.storage, id_compra, envio)
@@ -106,9 +104,7 @@ defmodule Libremarket.Envios.Server do
     envio = %{
       id_compra: id,
       tipo_envio: tipo_envio,
-      costo_envio: costo_envio,
-      seq: new_seq,
-      ts: :os.system_time(:millisecond)
+      costo_envio: costo_envio
     }
 
     new_storage = Map.put(state.storage, id, envio)
@@ -124,7 +120,6 @@ defmodule Libremarket.Envios.Server do
         replica_nodes
         |> Enum.map(fn node ->
           try do
-            # IMPORTANTE: mandamos el seq junto al RPC
             :rpc.call(node, Libremarket.Envios.Server, :replica_apply, [id, tipo_envio, costo_envio, new_seq], 5_000)
           catch
             :exit, reason ->
@@ -156,9 +151,7 @@ defmodule Libremarket.Envios.Server do
         envio = %{
           id_compra: id,
           tipo_envio: tipo_envio,
-          costo_envio: costo_envio,
-          seq: seq,
-          ts: :os.system_time(:millisecond)
+          costo_envio: costo_envio
         }
 
         new_storage = Map.put(state.storage, id, envio)
@@ -170,9 +163,7 @@ defmodule Libremarket.Envios.Server do
         envio = %{
           id_compra: id,
           tipo_envio: tipo_envio,
-          costo_envio: costo_envio,
-          seq: seq,
-          ts: :os.system_time(:millisecond)
+          costo_envio: costo_envio
         }
         new_storage = Map.put(state.storage, id, envio)
         new_state = %{state | storage: new_storage}
@@ -443,6 +434,85 @@ defmodule Libremarket.Envios.Server do
     end
 
     {:noreply, state}
+  end
+
+  def debug_cluster_state(timeout \\ 3_000) do
+    server_mod = __MODULE__
+
+    # quien es el owner global (si existe)
+    leader_pid = :global.whereis_name(server_mod)
+    leader_node = if is_pid(leader_pid), do: node(leader_pid), else: :undefined
+
+    # detectar nodos candidatos según el prefijo del módulo (igual que get_replica_nodes)
+    replica_nodes = get_replica_nodes()
+
+    # estado local (intenta Process.whereis primero, si no, intenta :global.whereis_name)
+    local_state =
+      case Process.whereis(server_mod) do
+        pid when is_pid(pid) ->
+          safe_call_local(server_mod, timeout)
+
+        nil ->
+          case :global.whereis_name(server_mod) do
+            pid when is_pid(pid) ->
+              # si el owner está en este nodo, pid estará aquí; si owner está en otro nodo,
+              # este devolverá pid solo si owner vive localmente.
+              if node(pid) == node() do
+                safe_call_local(server_mod, timeout)
+              else
+                {:error, :not_started_locally}
+              end
+
+            :undefined ->
+              {:error, :not_started}
+          end
+      end
+
+    # pedir estado a réplicas (RPCs)
+    peers =
+      replica_nodes
+      |> Enum.map(fn peer_node ->
+        {peer_node, fetch_remote_state(peer_node, server_mod, timeout)}
+      end)
+      |> Enum.into(%{})
+
+    %{
+      local: {node(), local_state},
+      leader_node: leader_node,
+      peers: peers,
+      timestamp: System.system_time(:millisecond)
+    }
+  end
+
+  defp safe_call_local(server_mod, timeout) do
+    try do
+      # si el módulo expone :get_state debería devolver {storage, seq} o similar
+      case GenServer.call(server_mod, :get_state, timeout) do
+        {storage, seq} -> {:ok, %{storage: storage, seq: seq}}
+        other -> {:ok, other}
+      end
+    catch
+      :exit, reason -> {:error, {:call_failed, reason}}
+      :error, reason -> {:error, {:call_failed, reason}}
+    end
+  end
+
+  defp fetch_remote_state(peer_node, server_mod, timeout) do
+    try do
+      case :rpc.call(peer_node, server_mod, :get_state, [], timeout) do
+        {storage, seq} when is_integer(seq) and (is_map(storage) or is_list(storage)) ->
+          {:ok, %{storage: storage, seq: seq}}
+
+        other when other == :badrpc ->
+          {:error, :badrpc}
+
+        other ->
+          {:error, {:invalid_reply, other}}
+      end
+    catch
+      :exit, reason -> {:error, {:badrpc, reason}}
+      :error, reason -> {:error, {:badrpc, reason}}
+    end
   end
 end
 

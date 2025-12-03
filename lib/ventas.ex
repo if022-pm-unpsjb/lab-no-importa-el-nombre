@@ -120,7 +120,7 @@ defmodule Libremarket.Ventas.Server do
     end
   end
 
-  # Primario: aplicar reserva y replicar (ahora con seq)
+  # Primario: aplicar reserva y replicar
   @impl true
   def handle_call({:apply_and_replicate, _id_compra, producto_id, cantidad}, _from, state) do
     case Map.fetch(state.storage, producto_id) do
@@ -134,7 +134,11 @@ defmodule Libremarket.Ventas.Server do
         new_stock = stock - cantidad
         new_seq = state.seq + 1
 
-        new_prod = prod |> Map.put(:stock, new_stock) |> Map.put(:seq, new_seq) |> Map.put(:ts, :os.system_time(:millisecond))
+        # construimos copia del producto sin seq/ts
+        new_prod =
+          prod
+          |> Map.put(:stock, new_stock)
+
         new_storage = Map.put(state.storage, producto_id, new_prod)
         new_state = %{state | storage: new_storage, seq: new_seq}
 
@@ -167,6 +171,7 @@ defmodule Libremarket.Ventas.Server do
 
     cond do
       seq > local_seq ->
+        # producto_map viene del primario; puede incluir campos stock, precio, name; guardamos tal cual (sin seq/ts)
         new_storage = Map.put(state.storage, producto_id, producto_map)
         new_state = %{state | storage: new_storage, seq: seq}
         Logger.info("Ventas REPLICA #{inspect(node())}: replica_update id=#{inspect(producto_id)} seq=#{seq} stock=#{producto_map[:stock]}")
@@ -435,6 +440,85 @@ defmodule Libremarket.Ventas.Server do
       node_str = Atom.to_string(node)
       String.starts_with?(node_str, service_prefix)
     end)
+  end
+
+  def debug_cluster_state(timeout \\ 3_000) do
+    server_mod = __MODULE__
+
+    # quien es el owner global (si existe)
+    leader_pid = :global.whereis_name(server_mod)
+    leader_node = if is_pid(leader_pid), do: node(leader_pid), else: :undefined
+
+    # detectar nodos candidatos según el prefijo del módulo (igual que get_replica_nodes)
+    replica_nodes = get_replica_nodes()
+
+    # estado local (intenta Process.whereis primero, si no, intenta :global.whereis_name)
+    local_state =
+      case Process.whereis(server_mod) do
+        pid when is_pid(pid) ->
+          safe_call_local(server_mod, timeout)
+
+        nil ->
+          case :global.whereis_name(server_mod) do
+            pid when is_pid(pid) ->
+              # si el owner está en este nodo, pid estará aquí; si owner está en otro nodo,
+              # este devolverá pid solo si owner vive localmente.
+              if node(pid) == node() do
+                safe_call_local(server_mod, timeout)
+              else
+                {:error, :not_started_locally}
+              end
+
+            :undefined ->
+              {:error, :not_started}
+          end
+      end
+
+    # pedir estado a réplicas (RPCs)
+    peers =
+      replica_nodes
+      |> Enum.map(fn peer_node ->
+        {peer_node, fetch_remote_state(peer_node, server_mod, timeout)}
+      end)
+      |> Enum.into(%{})
+
+    %{
+      local: {node(), local_state},
+      leader_node: leader_node,
+      peers: peers,
+      timestamp: System.system_time(:millisecond)
+    }
+  end
+
+  defp safe_call_local(server_mod, timeout) do
+    try do
+      # si el módulo expone :get_state debería devolver {storage, seq} o similar
+      case GenServer.call(server_mod, :get_state, timeout) do
+        {storage, seq} -> {:ok, %{storage: storage, seq: seq}}
+        other -> {:ok, other}
+      end
+    catch
+      :exit, reason -> {:error, {:call_failed, reason}}
+      :error, reason -> {:error, {:call_failed, reason}}
+    end
+  end
+
+  defp fetch_remote_state(peer_node, server_mod, timeout) do
+    try do
+      case :rpc.call(peer_node, server_mod, :get_state, [], timeout) do
+        {storage, seq} when is_integer(seq) and (is_map(storage) or is_list(storage)) ->
+          {:ok, %{storage: storage, seq: seq}}
+
+        other when other == :badrpc ->
+          {:error, :badrpc}
+
+        other ->
+          {:error, {:invalid_reply, other}}
+      end
+    catch
+      :exit, reason -> {:error, {:badrpc, reason}}
+      :error, reason -> {:error, {:badrpc, reason}}
+    end
   end
 end
 

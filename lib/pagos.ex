@@ -91,8 +91,8 @@ defmodule Libremarket.Pagos.Server do
   def handle_call({:autorizar_pago, id_compra}, _from, state) do
     pago = Libremarket.Pagos.autorizar_pago()
     new_seq = state.seq + 1
-    new_storage = Map.put(state.storage, id_compra, %{pago: pago, seq: new_seq, ts: :os.system_time(:millisecond)})
-    new_state = Map.put(state, id_compra, pago)
+    new_storage = Map.put(state.storage, id_compra, %{pago: pago})
+    new_state = %{state | storage: new_storage, seq: new_seq}
     {:reply, pago, new_state}
   end
 
@@ -104,18 +104,15 @@ defmodule Libremarket.Pagos.Server do
     {:reply, state, state}
   end
 
-
   @impl true
   def handle_call({:apply_and_replicate, id, pago_ok}, _from, state) do
-    # líder: incrementar seq, aplicar local, replicar con seq
     new_seq = state.seq + 1
-    new_storage = Map.put(state.storage, id, %{pago: pago_ok, seq: new_seq, ts: :os.system_time(:millisecond)})
+    new_storage = Map.put(state.storage, id, %{pago: pago_ok})
     state2 = %{state | storage: new_storage, seq: new_seq}
 
     replica_nodes = get_replica_nodes()
     Logger.info("Pagos.Server (primario) replica_nodes=#{inspect(replica_nodes)}")
 
-    # Si no hay réplicas, no hacemos RPC (evita bloquear)
     if replica_nodes == [] do
       Logger.info("Pagos.Server: no hay réplicas detectadas -> aplicando local y devolviendo :ok")
       {:reply, :ok, state2}
@@ -148,23 +145,20 @@ defmodule Libremarket.Pagos.Server do
 
   @impl true
   def handle_call({:replica_update, id, pago_ok, seq}, _from, state) do
-    # solo aplicar si seq >= seq local para evitar reordenamientos
     local_seq = state.seq
     cond do
       seq > local_seq ->
-        new_storage = Map.put(state.storage, id, %{pago: pago_ok, seq: seq, ts: :os.system_time(:millisecond)})
+        new_storage = Map.put(state.storage, id, %{pago: pago_ok})
         new_state = %{state | storage: new_storage, seq: seq}
         Logger.info("Pagos REPLICA #{inspect(node())}: replica_update id=#{inspect(id)} seq=#{seq} pago=#{inspect(pago_ok)}")
         {:reply, :ok, new_state}
 
       seq == local_seq ->
-        # aplicar igualmente (idempotente)
-        new_storage = Map.put(state.storage, id, %{pago: pago_ok, seq: seq, ts: :os.system_time(:millisecond)})
+        new_storage = Map.put(state.storage, id, %{pago: pago_ok})
         new_state = %{state | storage: new_storage}
         {:reply, :ok, new_state}
 
       true ->
-        # actualización vieja -> ignorar
         Logger.debug("Pagos REPLICA #{inspect(node())}: ignorando replica_update con seq antiguo #{seq} < #{local_seq}")
         {:reply, :ok, state}
     end
@@ -429,6 +423,85 @@ defmodule Libremarket.Pagos.Server do
     end
 
     {:noreply, state}
+  end
+
+  def debug_cluster_state(timeout \\ 3_000) do
+    server_mod = __MODULE__
+
+    # quien es el owner global (si existe)
+    leader_pid = :global.whereis_name(server_mod)
+    leader_node = if is_pid(leader_pid), do: node(leader_pid), else: :undefined
+
+    # detectar nodos candidatos según el prefijo del módulo (igual que get_replica_nodes)
+    replica_nodes = get_replica_nodes()
+
+    # estado local (intenta Process.whereis primero, si no, intenta :global.whereis_name)
+    local_state =
+      case Process.whereis(server_mod) do
+        pid when is_pid(pid) ->
+          safe_call_local(server_mod, timeout)
+
+        nil ->
+          case :global.whereis_name(server_mod) do
+            pid when is_pid(pid) ->
+              # si el owner está en este nodo, pid estará aquí; si owner está en otro nodo,
+              # este devolverá pid solo si owner vive localmente.
+              if node(pid) == node() do
+                safe_call_local(server_mod, timeout)
+              else
+                {:error, :not_started_locally}
+              end
+
+            :undefined ->
+              {:error, :not_started}
+          end
+      end
+
+    # pedir estado a réplicas (RPCs)
+    peers =
+      replica_nodes
+      |> Enum.map(fn peer_node ->
+        {peer_node, fetch_remote_state(peer_node, server_mod, timeout)}
+      end)
+      |> Enum.into(%{})
+
+    %{
+      local: {node(), local_state},
+      leader_node: leader_node,
+      peers: peers,
+      timestamp: System.system_time(:millisecond)
+    }
+  end
+
+  defp safe_call_local(server_mod, timeout) do
+    try do
+      # si el módulo expone :get_state debería devolver {storage, seq} o similar
+      case GenServer.call(server_mod, :get_state, timeout) do
+        {storage, seq} -> {:ok, %{storage: storage, seq: seq}}
+        other -> {:ok, other}
+      end
+    catch
+      :exit, reason -> {:error, {:call_failed, reason}}
+      :error, reason -> {:error, {:call_failed, reason}}
+    end
+  end
+
+  defp fetch_remote_state(peer_node, server_mod, timeout) do
+    try do
+      case :rpc.call(peer_node, server_mod, :get_state, [], timeout) do
+        {storage, seq} when is_integer(seq) and (is_map(storage) or is_list(storage)) ->
+          {:ok, %{storage: storage, seq: seq}}
+
+        other when other == :badrpc ->
+          {:error, :badrpc}
+
+        other ->
+          {:error, {:invalid_reply, other}}
+      end
+    catch
+      :exit, reason -> {:error, {:badrpc, reason}}
+      :error, reason -> {:error, {:badrpc, reason}}
+    end
   end
 end
 
